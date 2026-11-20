@@ -2,3 +2,9 @@
 /dist/
 *.log
 .DS_Store
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
