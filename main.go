@@ -260,7 +260,7 @@ func (a *api) routes() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		types := map[string]string{"/index.html": "text/html; charset=utf-8", "/help.html": "text/html; charset=utf-8", "/app.js": "text/javascript; charset=utf-8", "/style.css": "text/css; charset=utf-8"}
+		types := map[string]string{"/index.html": "text/html; charset=utf-8", "/help.html": "text/html; charset=utf-8", "/help.js": "text/javascript; charset=utf-8", "/app.js": "text/javascript; charset=utf-8", "/style.css": "text/css; charset=utf-8"}
 		w.Header().Set("Content-Type", types[path])
 		_, _ = w.Write(data)
 	})
@@ -316,9 +316,9 @@ func main() {
 		log.Fatal("首版仅监听回环地址；局域网设备配对尚未实现")
 	}
 	assets := map[string][]byte{}
-	for _, name := range []string{"index.html", "app.js", "style.css", "help.html"} {
+	for _, name := range []string{"index.html", "app.js", "style.css", "help.html", "help.js"} {
 		data, e := os.ReadFile(filepath.Join(*consoleDir, name))
-		if errors.Is(e, os.ErrNotExist) && name == "help.html" {
+		if errors.Is(e, os.ErrNotExist) && (name == "help.html" || name == "help.js") {
 			continue // Older console bundles did not include the guide.
 		}
 		if e != nil {
