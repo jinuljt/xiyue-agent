@@ -54,11 +54,12 @@ type Task struct {
 	ResumeStatus string     `json:"resume_status,omitempty"`
 }
 type Event struct {
-	ID     string    `json:"id"`
-	TaskID string    `json:"task_id"`
-	Text   string    `json:"text"`
-	Kind   string    `json:"kind"`
-	At     time.Time `json:"at"`
+	Delivery string    `json:"delivery,omitempty"`
+	ID       string    `json:"id"`
+	TaskID   string    `json:"task_id"`
+	Text     string    `json:"text"`
+	Kind     string    `json:"kind"`
+	At       time.Time `json:"at"`
 }
 type Schedule struct {
 	ID        string            `json:"id"`
@@ -71,19 +72,23 @@ type Schedule struct {
 	Failure   string            `json:"failure,omitempty"`
 }
 type State struct {
-	Version   int                `json:"version"`
-	Abilities map[string]Ability `json:"abilities"`
-	Tasks     []Task             `json:"tasks"`
-	Schedules []Schedule         `json:"schedules"`
-	Events    []Event            `json:"events"`
-	Settings  SystemConfig       `json:"settings"`
-	Sealed    map[string]string  `json:"sealed,omitempty"`
-	Usage     []UsageRecord      `json:"usage"`
+	ExternalTasks []externalTaskRef `json:"external_tasks,omitempty"`
+	queueSpeech   bool
+	Owner         *ownerState        `json:"owner,omitempty"`
+	Version       int                `json:"version"`
+	Abilities     map[string]Ability `json:"abilities"`
+	Tasks         []Task             `json:"tasks"`
+	Schedules     []Schedule         `json:"schedules"`
+	Events        []Event            `json:"events"`
+	Settings      SystemConfig       `json:"settings"`
+	Sealed        map[string]string  `json:"sealed,omitempty"`
+	Usage         []UsageRecord      `json:"usage"`
 }
 type Platform struct {
-	mu    sync.Mutex
-	path  string
-	state State
+	mu          sync.Mutex
+	path        string
+	state       State
+	queueSpeech bool
 }
 
 var identifier = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,47}$`)
@@ -182,11 +187,21 @@ func (p *Platform) change(fn func(*State) error) error {
 	if err := json.Unmarshal(data, &next); err != nil {
 		return err
 	}
+	next.queueSpeech = p.queueSpeech
 	if err := fn(&next); err != nil {
 		return err
 	}
 	if len(next.Events) > 200 {
-		next.Events = next.Events[len(next.Events)-200:]
+		discard := len(next.Events) - 200
+		kept := next.Events[:0]
+		for _, e := range next.Events {
+			if discard > 0 && e.Delivery != "pending" && e.Delivery != "playing" {
+				discard--
+				continue
+			}
+			kept = append(kept, e)
+		}
+		next.Events = kept
 	}
 	if len(next.Usage) > 500 {
 		next.Usage = next.Usage[len(next.Usage)-500:]
@@ -272,7 +287,20 @@ func configValues(a Ability, overrides map[string]string) (map[string]string, er
 	return values, nil
 }
 func emit(s *State, t *Task, kind, text string, now time.Time) {
-	s.Events = append(s.Events, Event{ID: newID(), TaskID: t.ID, Kind: kind, Text: text, At: now})
+	e := Event{ID: newID(), TaskID: t.ID, Kind: kind, Text: text, At: now}
+	if kind == "speech" && s.queueSpeech {
+		pending := 0
+		for _, queued := range s.Events {
+			if queued.Delivery == "pending" {
+				pending++
+			}
+		}
+		e.Delivery = "pending"
+		if pending >= 64 {
+			e.Delivery = "queue_full"
+		}
+	}
+	s.Events = append(s.Events, e)
 }
 func advance(s *State, t *Task, now time.Time) {
 	t.DueAt = nil

@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -24,6 +26,7 @@ type api struct {
 	platform *Platform
 	assets   map[string][]byte
 	voice    *voiceRuntime
+	admin    *adminGate
 }
 
 func decode(w http.ResponseWriter, r *http.Request, out any) error {
@@ -50,6 +53,8 @@ func (a *api) routes() http.Handler {
 	m := http.NewServeMux()
 	a.settingsRoutes(m)
 	a.voiceRoutes(m)
+	a.adminRoutes(m)
+	a.externalTaskRoutes(m)
 	m.HandleFunc("GET /api/state", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, a.platform.publicState()) })
 	m.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"name": "喜悦", "version": "0.2.0", "speech": "preview", "agent": "not_connected", "asr": "not_connected", "llm": "not_connected"})
@@ -276,7 +281,7 @@ func (a *api) routes() http.Handler {
 		w.Header().Set("Content-Type", types[path])
 		_, _ = w.Write(data)
 	})
-	return guard(m)
+	return a.guard(m)
 }
 
 var credentialRef = regexpCredential()
@@ -285,8 +290,8 @@ func regexpCredential() *regexp.Regexp {
 	return regexp.MustCompile(`^bitwarden:item:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 }
 
-// Loopback-only until device pairing and authenticated LAN access are implemented.
-func guard(next http.Handler) http.Handler {
+// The development listener stays on loopback. Paired management uses an explicit HTTPS origin.
+func (a *api) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -296,13 +301,20 @@ func guard(next http.Handler) http.Handler {
 		if err != nil {
 			host = r.Host
 		}
-		if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+		scheme := "http"
+		if a.admin != nil {
+			scheme = "https"
+			if r.TLS == nil || !strings.EqualFold(r.Host, a.admin.host) {
+				http.Error(w, "管理服务拒绝此访问地址", 403)
+				return
+			}
+		} else if host != "localhost" && host != "127.0.0.1" && host != "::1" {
 			http.Error(w, "本地控制台拒绝此 Host", 403)
 			return
 		}
 		if origin := r.Header.Get("Origin"); origin != "" {
 			u, e := url.Parse(origin)
-			if e != nil || u.Scheme != "http" || u.Host != r.Host {
+			if e != nil || u.Scheme != scheme || !strings.EqualFold(u.Host, r.Host) {
 				http.Error(w, "拒绝跨站请求", 403)
 				return
 			}
@@ -311,7 +323,20 @@ func guard(next http.Handler) http.Handler {
 			contentType := strings.TrimSpace(strings.SplitN(r.Header.Get("Content-Type"), ";", 2)[0])
 			if r.Header.Get("X-Xiyue-Request") != "console" ||
 				(contentType != "application/json" && !(r.Method == http.MethodPost && r.URL.Path == "/api/voice/turn" && contentType == "audio/wav")) {
-				http.Error(w, "需要同源 JSON 请求", 403)
+				http.Error(w, "请求来源或格式无效", 403)
+				return
+			}
+		}
+		if a.admin != nil && (r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/")) {
+			switch {
+			case r.URL.Path == "/api/voice/turn":
+				// Real capture arrives on the local, owner-only wake socket.
+				http.NotFound(w, r)
+				return
+			case r.Method == http.MethodGet && r.URL.Path == "/api/session":
+			case r.Method == http.MethodPost && r.URL.Path == "/api/session/pair":
+			case !a.platform.authenticated(r):
+				writeJSON(w, 401, map[string]string{"error": "请先配对并登录音箱"})
 				return
 			}
 		}
@@ -325,7 +350,28 @@ func main() {
 	consoleDir := flag.String("console", "../xiyue-console", "控制台静态文件目录")
 	abilityDir := flag.String("abilities", "../xiyue-abilities/capabilities", "可选的声明式能力目录")
 	systemVoice := flag.Bool("system-voice", false, "启用本机原生播报和 WAV 语音入口")
+	wakeSocket := flag.String("oh2p-wake-socket", "", "OH2P 本地唤醒事件套接字")
+	notifyWake := flag.String("notify-wake", "", "向正在运行的 OH2P Agent 通知唤醒词后退出")
+	cancelVoice := flag.Bool("cancel-voice", false, "向正在运行的 OH2P Agent 请求取消当前语音")
+	vad := flag.Float64("oh2p-vad-threshold", 1100000, "OH2P 录音 S32 RMS 声音阈值")
+	adminHost := flag.String("admin-host", "", "管理 HTTPS 地址中的主机和端口")
+	tlsCert := flag.String("admin-tls-cert", "", "受手机信任的 HTTPS 证书路径")
+	tlsKey := flag.String("admin-tls-key", "", "HTTPS 私钥路径")
+	pairFile := flag.String("admin-pairing-file", "", "仅本机所有者可读写的配对码文件")
 	flag.Parse()
+	if *notifyWake != "" || *cancelVoice {
+		if *wakeSocket == "" || (*notifyWake != "" && *cancelVoice) || strings.ContainsAny(*notifyWake, "\r\n") {
+			log.Fatal("请指定一个本地语音动作及唤醒套接字")
+		}
+		packet := "wake " + *notifyWake
+		if *cancelVoice {
+			packet = "cancel"
+		}
+		if err := sendWakePacket(*wakeSocket, packet); err != nil {
+			log.Fatal("无法连接本地喜悦 Agent")
+		}
+		return
+	}
 	var voice *voiceRuntime
 	if *systemVoice {
 		info, e := os.Stat(systemTTS)
@@ -335,8 +381,21 @@ func main() {
 		voice = &voiceRuntime{speak: speakSystem}
 	}
 	host, _, err := net.SplitHostPort(*listen)
-	if err != nil || (host != "127.0.0.1" && host != "::1") {
-		log.Fatal("首版仅监听回环地址；局域网设备配对尚未实现")
+	if err != nil {
+		log.Fatal("监听地址无效")
+	}
+	var admin *adminGate
+	if *adminHost != "" || *tlsCert != "" || *tlsKey != "" || *pairFile != "" {
+		name, e := url.Parse("https://" + *adminHost)
+		if *tlsCert == "" || *tlsKey == "" || *pairFile == "" || e != nil || name.Host != *adminHost || name.Hostname() == "" || name.User != nil {
+			log.Fatal("配对模式需要明确的管理主机、HTTPS 证书、私钥和配对码文件")
+		}
+		admin, err = readAdminPairing(*adminHost, *pairFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+	} else if host != "127.0.0.1" && host != "::1" {
+		log.Fatal("非回环监听必须启用 HTTPS 配对")
 	}
 	assets := map[string][]byte{}
 	for _, name := range []string{"index.html", "app.js", "style.css", "help.html", "help.js"} {
@@ -386,6 +445,28 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if voice != nil {
+		p.queueSpeech = true
+		if err := p.recoverDeliveries(); err != nil {
+			log.Fatal("无法恢复提醒播报状态")
+		}
+		go p.serveDeliveries(ctx, voice)
+	}
+	if *wakeSocket != "" {
+		if voice == nil || !(*vad > 0) || math.IsInf(*vad, 0) {
+			log.Fatal("OH2P 唤醒套接字需要系统语音及有效录音阈值")
+		}
+		arecord, e := exec.LookPath("arecord")
+		if e != nil {
+			log.Fatal("未找到 OH2P 录音命令")
+		}
+		wakes, e := openWakeSocket(*wakeSocket)
+		if e != nil {
+			log.Fatalf("无法启动 OH2P 唤醒套接字: %v", e)
+		}
+		defer wakes.Close()
+		go p.serveWakeSocket(ctx, wakes, voice, func(ctx context.Context) ([]byte, error) { return captureOH2P(ctx, arecord, *vad) }, oh2pListeningLED)
+	}
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
@@ -400,15 +481,21 @@ func main() {
 			}
 		}
 	}()
-	server := &http.Server{Handler: (&api{platform: p, assets: assets, voice: voice}).routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 55 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	server := &http.Server{Handler: (&api{platform: p, assets: assets, voice: voice, admin: admin}).routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 55 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	fmt.Printf("喜悦 · http://%s · 系统语音入口启用：%t\n", listener.Addr(), voice != nil)
-	if err = server.Serve(listener); err != nil && err != http.ErrServerClosed {
+	if admin != nil {
+		fmt.Printf("喜悦 · https://%s · 配对管理\n", admin.host)
+		err = server.ServeTLS(listener, *tlsCert, *tlsKey)
+	} else {
+		fmt.Printf("喜悦 · http://%s · 系统语音入口启用：%t\n", listener.Addr(), voice != nil)
+		err = server.Serve(listener)
+	}
+	if err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }

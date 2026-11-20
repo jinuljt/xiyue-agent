@@ -28,17 +28,18 @@ type ServiceConfig struct {
 	KeyConfigured bool   `json:"key_configured"`
 }
 type SystemConfig struct {
-	Revision      int           `json:"revision"`
-	SetupComplete bool          `json:"setup_complete"`
-	Name          string        `json:"name"`
-	WakeWord      string        `json:"wake_word"`
-	Timezone      string        `json:"timezone"`
-	Mode          string        `json:"mode"`
-	ASR           ServiceConfig `json:"asr"`
-	LLM           ServiceConfig `json:"llm"`
-	TTS           ServiceConfig `json:"tts"`
-	External      ServiceConfig `json:"external"`
-	UpdatedAt     *time.Time    `json:"updated_at,omitempty"`
+	DeviceSetupComplete bool          `json:"device_setup_complete"`
+	Revision            int           `json:"revision"`
+	SetupComplete       bool          `json:"setup_complete"`
+	Name                string        `json:"name"`
+	WakeWord            string        `json:"wake_word"`
+	Timezone            string        `json:"timezone"`
+	Mode                string        `json:"mode"`
+	ASR                 ServiceConfig `json:"asr"`
+	LLM                 ServiceConfig `json:"llm"`
+	TTS                 ServiceConfig `json:"tts"`
+	External            ServiceConfig `json:"external"`
+	UpdatedAt           *time.Time    `json:"updated_at,omitempty"`
 }
 type ServiceInput struct {
 	Provider string `json:"provider"`
@@ -99,7 +100,13 @@ func providers() map[string][]Provider {
 func defaultSettings() SystemConfig {
 	return SystemConfig{Revision: 1, Name: "喜悦音箱", WakeWord: "喜悦", Timezone: "Asia/Shanghai", Mode: "direct", LLM: ServiceConfig{Provider: "deepseek", Endpoint: "https://api.deepseek.com", Model: "deepseek-flash"}, ASR: ServiceConfig{Provider: "doubao"}, TTS: ServiceConfig{Provider: "system"}, External: ServiceConfig{Provider: "http_json"}}
 }
-func (p *Platform) publicState() State { s := p.snapshot(); s.Sealed = nil; return s }
+func (p *Platform) publicState() State {
+	s := p.snapshot()
+	s.Sealed = nil
+	s.Owner = nil
+	s.ExternalTasks = nil
+	return s
+}
 
 func validateEndpoint(raw string) error {
 	if raw == "" {
@@ -193,7 +200,7 @@ func (p *Platform) saveSettings(in SettingsInput) error {
 		if s.Sealed == nil {
 			s.Sealed = map[string]string{}
 		}
-		next := SystemConfig{SetupComplete: s.Settings.SetupComplete, Revision: in.Revision + 1, Name: strings.TrimSpace(in.Name), WakeWord: strings.TrimSpace(in.WakeWord), Timezone: in.Timezone, Mode: in.Mode}
+		next := SystemConfig{SetupComplete: s.Settings.SetupComplete, DeviceSetupComplete: s.Settings.DeviceSetupComplete, Revision: in.Revision + 1, Name: strings.TrimSpace(in.Name), WakeWord: strings.TrimSpace(in.WakeWord), Timezone: in.Timezone, Mode: in.Mode}
 		for name, input := range map[string]ServiceInput{"asr": in.ASR, "llm": in.LLM, "tts": in.TTS, "external": in.External} {
 			known := false
 			for _, option := range providers()[name] {

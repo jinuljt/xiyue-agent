@@ -28,10 +28,12 @@ type voiceRuntime struct {
 	speak  func(context.Context, string) error
 	mu     sync.Mutex
 	active bool
+	cancel context.CancelFunc
 	last   *voiceResult
 }
 
 type voiceResult struct {
+	CaptureMS  int64  `json:"capture_ms,omitempty"`
 	Revision   int    `json:"revision"`
 	Stage      string `json:"stage"`
 	ASRMS      int64  `json:"asr_ms"`
@@ -203,53 +205,92 @@ func (a *api) voiceRoutes(m *http.ServeMux) {
 			bad(w, errors.New("需要不超过 30 秒的 16 kHz 单声道 16 位 PCM WAV"))
 			return
 		}
-		v.mu.Lock()
-		if v.active {
-			v.mu.Unlock()
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "音箱正在处理另一段语音"})
-			return
-		}
-		v.active = true
-		v.mu.Unlock()
-		s := a.platform.snapshot()
-		result := voiceResult{Revision: s.Settings.Revision, Stage: "configuration"}
-		defer func() {
-			v.mu.Lock()
-			defer v.mu.Unlock()
-			v.active = false
-			v.last = &result
-		}()
-		ctx, cancel := context.WithTimeout(r.Context(), 50*time.Second)
-		defer cancel()
-		if s.Settings.TTS.Provider != "system" {
-			bad(w, errors.New("语音入口目前仅支持系统语音"))
-			return
-		}
-		result.Stage = "asr"
-		start := time.Now()
-		text, err := a.platform.transcribe(ctx, s, wav)
-		result.ASRMS = time.Since(start).Milliseconds()
-		if err != nil {
+		result, err := a.platform.runVoiceTurn(r.Context(), v, func(context.Context) ([]byte, error) { return wav, nil }, nil)
+		if errors.Is(err, errVoiceBusy) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		} else if err != nil {
 			bad(w, err)
-			return
+		} else {
+			writeJSON(w, 200, result)
 		}
-		result.Stage = "model"
-		start = time.Now()
-		reply, err := a.platform.respond(ctx, s, text, false)
-		result.ModelMS = time.Since(start).Milliseconds()
-		if err != nil {
-			bad(w, err)
-			return
-		}
-		result.Stage = "playback"
-		start = time.Now()
-		err = v.speak(ctx, reply)
-		result.PlaybackMS = time.Since(start).Milliseconds()
-		if err != nil {
-			bad(w, err)
-			return
-		}
-		result.Stage = "completed"
-		writeJSON(w, 200, result)
 	})
+}
+
+var errVoiceBusy = errors.New("音箱正在处理另一段语音")
+
+func (v *voiceRuntime) stopTurn() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.cancel != nil {
+		v.cancel()
+	}
+}
+func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture func(context.Context) ([]byte, error), captureLED func(bool)) (result voiceResult, err error) {
+	v.mu.Lock()
+	if v.active {
+		v.mu.Unlock()
+		return result, errVoiceBusy
+	}
+	ctx, cancel := context.WithTimeout(parent, 50*time.Second)
+	v.active, v.cancel = true, cancel
+	v.mu.Unlock()
+	defer func() {
+		if ctx.Err() != nil {
+			result.Stage = "cancelled"
+			if err == nil {
+				err = ctx.Err()
+			}
+		}
+		cancel()
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		v.active = false
+		v.cancel = nil
+		v.last = &result
+	}()
+	s := p.snapshot()
+	result.Revision = s.Settings.Revision
+	result.Stage = "configuration"
+	if s.Settings.TTS.Provider != "system" {
+		return result, errors.New("语音入口目前仅支持系统语音")
+	}
+	if s.Settings.ASR.Provider != "sensevoice" || s.Settings.ASR.Endpoint == "" {
+		return result, errors.New("请先配置 FunASR SenseVoice 服务地址")
+	}
+	result.Stage = "capture"
+	start := time.Now()
+	if captureLED != nil {
+		captureLED(true)
+	}
+	wav, err := capture(ctx)
+	if captureLED != nil {
+		captureLED(false)
+	}
+	result.CaptureMS = time.Since(start).Milliseconds()
+	if err != nil {
+		return result, err
+	}
+	result.Stage = "asr"
+	start = time.Now()
+	text, err := p.transcribe(ctx, s, wav)
+	result.ASRMS = time.Since(start).Milliseconds()
+	if err != nil {
+		return result, err
+	}
+	result.Stage = "model"
+	start = time.Now()
+	reply, err := p.respond(ctx, s, text, false)
+	result.ModelMS = time.Since(start).Milliseconds()
+	if err != nil {
+		return result, err
+	}
+	result.Stage = "playback"
+	start = time.Now()
+	err = v.speak(ctx, reply)
+	result.PlaybackMS = time.Since(start).Milliseconds()
+	if err != nil {
+		return result, err
+	}
+	result.Stage = "completed"
+	return result, nil
 }
