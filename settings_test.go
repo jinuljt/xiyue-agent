@@ -213,3 +213,49 @@ func TestAnthropicPreviewCompletesFirstSetup(t *testing.T) {
 		t.Fatal("setup completion and token usage must survive edits and reload")
 	}
 }
+
+func TestHybridRoutesOnlyTheExplicitRequest(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/chat/completions":
+			if r.Header.Get("Authorization") != "Bearer test-model" {
+				t.Error("model received wrong credential")
+			}
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"model"}}]}`)
+		case "/v1/chat":
+			var task map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&task); err != nil || task["message"] != "概括当前工作区" {
+				t.Error("connector did not receive just the delegated task")
+			}
+			if r.Header.Get("Authorization") != "Bearer test-connector" {
+				t.Error("connector received wrong credential")
+			}
+			_, _ = io.WriteString(w, `{"reply":"external"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+	p, err := openPlatform(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := settingsInput(p.snapshot().Settings)
+	in.Mode = "hybrid"
+	in.LLM = ServiceInput{Provider: "custom", Endpoint: provider.URL, Model: "test", APIKey: "test-model"}
+	in.External = ServiceInput{Provider: "http_json", Endpoint: provider.URL + "/v1/chat", APIKey: "test-connector"}
+	if err := p.saveSettings(in); err != nil {
+		t.Fatal(err)
+	}
+	for text, want := range map[string]string{"什么内容适合交给外部助手？": "model", "交给外部助手，概括当前工作区": "external"} {
+		if reply, err := p.chat(context.Background(), text); err != nil || reply != want {
+			t.Fatalf("route failed: got %q, error %v", reply, err)
+		}
+	}
+	if _, err := p.chat(context.Background(), "交给外部助手。"); err == nil {
+		t.Fatal("empty delegated task should be rejected")
+	}
+	if len(p.snapshot().Usage) != 2 {
+		t.Fatal("each nonempty request should use exactly one service")
+	}
+}

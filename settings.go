@@ -85,7 +85,7 @@ func providers() map[string][]Provider {
 			{ID: "custom_anthropic", Name: "自定义 · Anthropic Messages", Note: "填写兼容 Messages 的 Base URL 和模型 ID。"},
 		},
 		"asr": {
-			{ID: "doubao", Name: "豆包语音", Note: "填写豆包语音服务地址、资源 ID 和密钥。"},
+			{ID: "doubao", Name: "豆包语音（云端）", Model: doubaoASRResource, Models: []string{doubaoASRResource, "volc.seedasr.sauc.concurrent", "volc.bigasr.sauc.duration", "volc.bigasr.sauc.concurrent"}, Note: "开通豆包流式语音识别，填写火山引擎 API Key 并选择对应资源。"},
 			{ID: "sensevoice", Name: "自建 SenseVoice", Note: "填写你部署的 SenseVoice 服务地址。"},
 			{ID: "custom", Name: "其他语音识别服务", Note: "保存服务地址与接入凭证，协议适配需另行接入。"},
 		},
@@ -274,14 +274,24 @@ func (p *Platform) chat(ctx context.Context, message string) (string, error) {
 func (p *Platform) respond(ctx context.Context, s State, message string, markTextSetup bool) (string, error) {
 	config := s.Settings.LLM
 	service := "llm"
+	useExternal := s.Settings.Mode == "external"
 	if s.Settings.Mode == "hybrid" {
-		return "", errors.New("混合模式编排尚未接入，请选择直连模型或外部 Agent 进行文字验证")
+		if task, ok := strings.CutPrefix(strings.TrimSpace(message), "交给外部助手"); ok {
+			message = strings.TrimLeft(strings.TrimSpace(task), "：:，,。 ")
+			if message == "" {
+				return "", errors.New("请说出要交给外部助手的任务")
+			}
+			useExternal = true
+		}
 	}
-	if s.Settings.Mode == "external" {
+	if useExternal {
 		config = s.Settings.External
 		service = "external"
 	}
-	if config.Endpoint == "" || (service == "llm" && config.Model == "") {
+	if useExternal && config.Endpoint == "" {
+		return "", errors.New("请先保存外部助手的连接地址")
+	}
+	if !useExternal && (config.Endpoint == "" || config.Model == "") {
 		return "", errors.New("请先保存完整的服务地址与模型配置")
 	}
 	endpoint := config.Endpoint

@@ -94,6 +94,9 @@ func validVoiceWAV(data []byte) bool {
 
 func (p *Platform) transcribe(ctx context.Context, s State, wav []byte) (string, error) {
 	cfg := s.Settings.ASR
+	if cfg.Provider == "doubao" {
+		return p.transcribeDoubao(ctx, s, wav)
+	}
 	if cfg.Provider != "sensevoice" || cfg.Endpoint == "" {
 		return "", errors.New("请先配置 FunASR SenseVoice 服务地址")
 	}
@@ -255,8 +258,11 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 	if s.Settings.TTS.Provider != "system" {
 		return result, errors.New("语音入口目前仅支持系统语音")
 	}
-	if s.Settings.ASR.Provider != "sensevoice" || s.Settings.ASR.Endpoint == "" {
-		return result, errors.New("请先配置 FunASR SenseVoice 服务地址")
+	asr := s.Settings.ASR
+	ready := (asr.Provider == "sensevoice" && asr.Endpoint != "") ||
+		(asr.Provider == "doubao" && asr.Endpoint == "" && asr.KeyConfigured)
+	if !ready {
+		return result, errors.New("请先配置自建 SenseVoice 或豆包语音识别")
 	}
 	result.Stage = "capture"
 	start := time.Now()
