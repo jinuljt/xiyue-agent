@@ -164,13 +164,14 @@ func (p *Platform) serveWakeSocket(ctx context.Context, listener net.Listener, v
 				// runVoiceTurn discards competing wake events while any turn owns the microphone.
 				go func() {
 					result, err := p.runVoiceTurn(ctx, v, capture, setLED)
-					if err != nil || result.Stage != "completed" {
+					if err != nil || result.Stage != "completed" || !result.modelUsed {
 						return
 					}
 					_ = p.change(func(s *State) error {
-						if s.Settings.Revision == result.Revision {
-							s.Settings.DeviceSetupComplete = true
+						if s.Settings.Revision != result.Revision || s.Settings.DeviceSetupComplete {
+							return errNoVoiceChange
 						}
+						s.Settings.DeviceSetupComplete = true
 						return nil
 					})
 				}()

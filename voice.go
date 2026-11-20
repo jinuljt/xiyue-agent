@@ -33,6 +33,7 @@ type voiceRuntime struct {
 }
 
 type voiceResult struct {
+	modelUsed  bool
 	CaptureMS  int64  `json:"capture_ms,omitempty"`
 	Revision   int    `json:"revision"`
 	Stage      string `json:"stage"`
@@ -277,12 +278,20 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 	if err != nil {
 		return result, err
 	}
-	result.Stage = "model"
-	start = time.Now()
-	reply, err := p.respond(ctx, s, text, false)
-	result.ModelMS = time.Since(start).Milliseconds()
+	result.Stage = "local_task"
+	reply, handled, err := p.voiceTask(text, time.Now().UTC())
 	if err != nil {
 		return result, err
+	}
+	if !handled {
+		result.modelUsed = true
+		result.Stage = "model"
+		start = time.Now()
+		reply, err = p.respond(ctx, s, text, false)
+		result.ModelMS = time.Since(start).Milliseconds()
+		if err != nil {
+			return result, err
+		}
 	}
 	result.Stage = "playback"
 	start = time.Now()
