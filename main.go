@@ -47,9 +47,10 @@ func bad(w http.ResponseWriter, err error) {
 }
 func (a *api) routes() http.Handler {
 	m := http.NewServeMux()
-	m.HandleFunc("GET /api/state", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, a.platform.snapshot()) })
+	a.settingsRoutes(m)
+	m.HandleFunc("GET /api/state", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, a.platform.publicState()) })
 	m.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"name": "喜悦", "version": "0.1.0", "speech": "preview", "agent": "not_connected", "asr": "not_connected", "llm": "not_connected"})
+		writeJSON(w, 200, map[string]any{"name": "喜悦", "version": "0.2.0", "speech": "preview", "agent": "not_connected", "asr": "not_connected", "llm": "not_connected"})
 	})
 	m.HandleFunc("GET /api/tools", func(w http.ResponseWriter, r *http.Request) {
 		// The same manifests drive console forms and an eventual model tool adapter.
@@ -89,8 +90,10 @@ func (a *api) routes() http.Handler {
 	})
 	m.HandleFunc("PUT /api/abilities/{id}", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
-			Enabled bool              `json:"enabled"`
-			Config  map[string]string `json:"config"`
+			Enabled      bool              `json:"enabled"`
+			Config       map[string]string `json:"config"`
+			Secrets      map[string]string `json:"secrets"`
+			ClearSecrets []string          `json:"clear_secrets"`
 		}
 		if err := decode(w, r, &in); err != nil {
 			bad(w, err)
@@ -113,8 +116,37 @@ func (a *api) routes() http.Handler {
 				if !exists || len(v) > 2000 {
 					return errors.New("未知配置项或内容过长")
 				}
+				if f.Kind == "secret" {
+					return errors.New("密钥必须通过凭证字段保存，不能写入普通配置")
+				}
 				if f.Kind == "credential_ref" && v != "" && !credentialRef.MatchString(v) {
 					return errors.New("请填写 bitwarden:item:条目UUID，不接受明文密钥")
+				}
+			}
+			if s.Sealed == nil {
+				s.Sealed = map[string]string{}
+			}
+			for _, k := range in.ClearSecrets {
+				if known[k].Kind != "secret" {
+					return errors.New("未知凭证字段")
+				}
+				delete(s.Sealed, "ability:"+r.PathValue("id")+":"+k)
+			}
+			for k, v := range in.Secrets {
+				if known[k].Kind != "secret" {
+					return errors.New("未知凭证字段")
+				}
+				if v != "" {
+					sealed, err := a.platform.seal("ability:"+r.PathValue("id")+":"+k, v)
+					if err != nil {
+						return err
+					}
+					s.Sealed["ability:"+r.PathValue("id")+":"+k] = sealed
+				}
+			}
+			for k, f := range known {
+				if f.Kind == "secret" && s.Sealed["ability:"+r.PathValue("id")+":"+k] != "" {
+					in.Config[k] = "已配置"
 				}
 			}
 			ability.Config = in.Config
@@ -342,7 +374,7 @@ func main() {
 			}
 		}
 	}()
-	server := &http.Server{Handler: (&api{platform: p, assets: assets}).routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	server := &http.Server{Handler: (&api{platform: p, assets: assets}).routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 55 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)

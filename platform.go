@@ -75,6 +75,9 @@ type State struct {
 	Tasks     []Task             `json:"tasks"`
 	Schedules []Schedule         `json:"schedules"`
 	Events    []Event            `json:"events"`
+	Settings  SystemConfig       `json:"settings"`
+	Sealed    map[string]string  `json:"sealed,omitempty"`
+	Usage     []UsageRecord      `json:"usage"`
 }
 type Platform struct {
 	mu    sync.Mutex
@@ -104,10 +107,10 @@ func validateManifest(m Manifest) error {
 		if _, ok := fields[f.Key]; ok {
 			return errors.New("配置字段重复")
 		}
-		if f.Kind != "text" && f.Kind != "number" && f.Kind != "credential_ref" {
+		if f.Kind != "text" && f.Kind != "number" && f.Kind != "credential_ref" && f.Kind != "secret" {
 			return errors.New("不支持的配置字段类型")
 		}
-		if f.Kind == "credential_ref" && f.Default != "" {
+		if (f.Kind == "credential_ref" || f.Kind == "secret") && f.Default != "" {
 			return errors.New("凭证引用不能提供默认值")
 		}
 		fields[f.Key] = f
@@ -121,7 +124,7 @@ func validateManifest(m Manifest) error {
 		}
 		for _, match := range placeholder.FindAllStringSubmatch(s.Text, -1) {
 			f, ok := fields[match[1]]
-			if !ok || f.Kind == "credential_ref" {
+			if !ok || f.Kind == "credential_ref" || f.Kind == "secret" {
 				return errors.New("步骤引用了未知字段或凭证；凭证不能用于播报")
 			}
 		}
@@ -142,12 +145,16 @@ func openPlatform(path string) (*Platform, error) {
 		if p.state.Version != 1 || p.state.Abilities == nil {
 			return nil, errors.New("不支持的状态格式")
 		}
+		if p.state.Settings.Revision == 0 {
+			p.state.Settings = defaultSettings()
+		}
 		return p, nil
 	}
 	if !os.IsNotExist(err) {
 		return nil, err
 	}
 	p.state = State{Version: 1, Abilities: map[string]Ability{}, Tasks: []Task{}, Schedules: []Schedule{}, Events: []Event{}}
+	p.state.Settings = defaultSettings()
 	for _, m := range builtinManifests() {
 		if err = validateManifest(m); err != nil {
 			return nil, err
@@ -173,6 +180,9 @@ func (p *Platform) change(fn func(*State) error) error {
 	}
 	if len(next.Events) > 200 {
 		next.Events = next.Events[len(next.Events)-200:]
+	}
+	if len(next.Usage) > 500 {
+		next.Usage = next.Usage[len(next.Usage)-500:]
 	}
 	data, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
@@ -226,7 +236,7 @@ func configValues(a Ability, overrides map[string]string) (map[string]string, er
 	}
 	for k, v := range overrides {
 		f, ok := known[k]
-		if !ok || f.Kind == "credential_ref" {
+		if !ok || f.Kind == "credential_ref" || f.Kind == "secret" {
 			return nil, errors.New("未知参数或不可覆盖的凭证引用")
 		}
 		values[k] = v
