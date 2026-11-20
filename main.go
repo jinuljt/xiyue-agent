@@ -23,6 +23,7 @@ import (
 type api struct {
 	platform *Platform
 	assets   map[string][]byte
+	voice    *voiceRuntime
 }
 
 func decode(w http.ResponseWriter, r *http.Request, out any) error {
@@ -48,6 +49,7 @@ func bad(w http.ResponseWriter, err error) {
 func (a *api) routes() http.Handler {
 	m := http.NewServeMux()
 	a.settingsRoutes(m)
+	a.voiceRoutes(m)
 	m.HandleFunc("GET /api/state", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, a.platform.publicState()) })
 	m.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"name": "喜悦", "version": "0.2.0", "speech": "preview", "agent": "not_connected", "asr": "not_connected", "llm": "not_connected"})
@@ -306,7 +308,9 @@ func guard(next http.Handler) http.Handler {
 			}
 		}
 		if r.Method != "GET" && r.Method != "HEAD" {
-			if r.Header.Get("X-Xiyue-Request") != "console" || !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+			contentType := strings.TrimSpace(strings.SplitN(r.Header.Get("Content-Type"), ";", 2)[0])
+			if r.Header.Get("X-Xiyue-Request") != "console" ||
+				(contentType != "application/json" && !(r.Method == http.MethodPost && r.URL.Path == "/api/voice/turn" && contentType == "audio/wav")) {
 				http.Error(w, "需要同源 JSON 请求", 403)
 				return
 			}
@@ -320,7 +324,16 @@ func main() {
 	statePath := flag.String("state", "data/state.json", "持久化状态文件")
 	consoleDir := flag.String("console", "../xiyue-console", "控制台静态文件目录")
 	abilityDir := flag.String("abilities", "../xiyue-abilities/capabilities", "可选的声明式能力目录")
+	systemVoice := flag.Bool("system-voice", false, "启用本机原生播报和 WAV 语音入口")
 	flag.Parse()
+	var voice *voiceRuntime
+	if *systemVoice {
+		info, e := os.Stat(systemTTS)
+		if e != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+			log.Fatal("未找到可执行的音箱系统语音服务")
+		}
+		voice = &voiceRuntime{speak: speakSystem}
+	}
 	host, _, err := net.SplitHostPort(*listen)
 	if err != nil || (host != "127.0.0.1" && host != "::1") {
 		log.Fatal("首版仅监听回环地址；局域网设备配对尚未实现")
@@ -387,14 +400,14 @@ func main() {
 			}
 		}
 	}()
-	server := &http.Server{Handler: (&api{platform: p, assets: assets}).routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 55 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	server := &http.Server{Handler: (&api{platform: p, assets: assets, voice: voice}).routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 55 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	fmt.Printf("喜悦 · http://%s · 仅文字预览，不连接音箱\n", listener.Addr())
+	fmt.Printf("喜悦 · http://%s · 系统语音入口启用：%t\n", listener.Addr(), voice != nil)
 	if err = server.Serve(listener); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}

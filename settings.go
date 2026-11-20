@@ -261,7 +261,10 @@ func (p *Platform) chat(ctx context.Context, message string) (string, error) {
 	if strings.TrimSpace(message) == "" || len(message) > 16000 {
 		return "", errors.New("请输入不超过16000字节的文字")
 	}
-	s := p.snapshot()
+	return p.respond(ctx, p.snapshot(), message, true)
+}
+
+func (p *Platform) respond(ctx context.Context, s State, message string, markTextSetup bool) (string, error) {
 	config := s.Settings.LLM
 	service := "llm"
 	if s.Settings.Mode == "hybrid" {
@@ -386,7 +389,7 @@ func (p *Platform) chat(ctx context.Context, message string) (string, error) {
 	usage.Success = usage.ErrorCode == ""
 	if err = p.change(func(s *State) error {
 		s.Usage = append(s.Usage, usage)
-		if usage.Success && s.Settings.Revision == usage.ConfigRevision {
+		if markTextSetup && usage.Success && s.Settings.Revision == usage.ConfigRevision {
 			s.Settings.SetupComplete = true
 		}
 		return nil
@@ -435,6 +438,19 @@ func (a *api) settingsRoutes(m *http.ServeMux) {
 		s := a.platform.publicState()
 		var mem runtime.MemStats
 		runtime.ReadMemStats(&mem)
-		writeJSON(w, 200, map[string]any{"version": "0.2.0", "environment": "development", "device_connected": false, "voice_connected": false, "uptime_seconds": int(time.Since(bootTime).Seconds()), "memory_bytes": mem.Alloc, "platform": runtime.GOOS + "/" + runtime.GOARCH, "config_revision": s.Settings.Revision, "services": map[string]any{"asr": map[string]string{"runtime": "not_integrated"}, "llm": map[string]string{"runtime": "text_preview"}, "tts": map[string]string{"runtime": "not_integrated"}, "external": map[string]string{"runtime": "http_json_preview"}}, "usage": s.Usage})
+		asr, tts := "not_integrated", "not_integrated"
+		if a.voice != nil {
+			asr, tts = "sensevoice_wav", "system_command"
+		}
+		writeJSON(w, 200, map[string]any{
+			"version": "0.2.0", "environment": "development", "device_connected": false, "voice_connected": false,
+			"uptime_seconds": int(time.Since(bootTime).Seconds()), "memory_bytes": mem.Alloc,
+			"platform": runtime.GOOS + "/" + runtime.GOARCH, "config_revision": s.Settings.Revision,
+			"services": map[string]any{
+				"asr": map[string]string{"runtime": asr}, "llm": map[string]string{"runtime": "text_preview"},
+				"tts": map[string]string{"runtime": tts}, "external": map[string]string{"runtime": "http_json_preview"},
+			},
+			"usage": s.Usage, "voice": a.voice.status(),
+		})
 	})
 }
