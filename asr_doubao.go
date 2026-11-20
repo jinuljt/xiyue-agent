@@ -40,12 +40,10 @@ func (p *Platform) transcribeDoubao(ctx context.Context, s State, wav []byte) (s
 	return recognizeDoubao(ctx, doubaoASREndpoint, resource, key, wav)
 }
 
-func recognizeDoubao(parent context.Context, endpoint, resource, key string, wav []byte) (string, error) {
-	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
-	defer cancel()
+func doubaoHeaders(key, resource string) (http.Header, error) {
 	var requestID [16]byte
 	if _, err := rand.Read(requestID[:]); err != nil {
-		return "", err
+		return nil, err
 	}
 	requestID[6] = (requestID[6] & 0x0f) | 0x40
 	requestID[8] = (requestID[8] & 0x3f) | 0x80
@@ -53,6 +51,16 @@ func recognizeDoubao(parent context.Context, endpoint, resource, key string, wav
 	headers.Set("X-Api-Key", key)
 	headers.Set("X-Api-Resource-Id", resource)
 	headers.Set("X-Api-Request-Id", fmt.Sprintf("%x-%x-%x-%x-%x", requestID[:4], requestID[4:6], requestID[6:8], requestID[8:10], requestID[10:]))
+	return headers, nil
+}
+
+func recognizeDoubao(parent context.Context, endpoint, resource, key string, wav []byte) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
+	defer cancel()
+	headers, err := doubaoHeaders(key, resource)
+	if err != nil {
+		return "", err
+	}
 	conn, response, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{
 		HTTPHeader: headers,
 		HTTPClient: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},

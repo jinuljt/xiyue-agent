@@ -25,11 +25,12 @@ const (
 )
 
 type voiceRuntime struct {
-	speak  func(context.Context, string) error
-	mu     sync.Mutex
-	active bool
-	cancel context.CancelFunc
-	last   *voiceResult
+	speak   func(context.Context, string) error
+	playPCM pcmPlayer
+	mu      sync.Mutex
+	active  bool
+	cancel  context.CancelFunc
+	last    *voiceResult
 }
 
 type voiceResult struct {
@@ -48,7 +49,7 @@ func (v *voiceRuntime) status() any {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return map[string]any{"available": true, "busy": v.active, "last_turn": v.last}
+	return map[string]any{"available": true, "cloud_tts_available": v.playPCM != nil, "busy": v.active, "last_turn": v.last}
 }
 
 // Accept only finished clips from the device's 16 kHz mono PCM capture boundary.
@@ -90,6 +91,11 @@ func validVoiceWAV(data []byte) bool {
 		offset += 8 + int(padded)
 	}
 	return formatOK && audioOK
+}
+
+func asrReady(asr ServiceConfig) bool {
+	return (asr.Provider == "sensevoice" && asr.Endpoint != "") ||
+		(asr.Provider == "doubao" && asr.Endpoint == "" && asr.KeyConfigured)
 }
 
 func (p *Platform) transcribe(ctx context.Context, s State, wav []byte) (string, error) {
@@ -255,13 +261,10 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 	s := p.snapshot()
 	result.Revision = s.Settings.Revision
 	result.Stage = "configuration"
-	if s.Settings.TTS.Provider != "system" {
-		return result, errors.New("语音入口目前仅支持系统语音")
+	if !ttsReady(v, s) {
+		return result, errors.New("请配置系统语音或可用的豆包语音合成服务")
 	}
-	asr := s.Settings.ASR
-	ready := (asr.Provider == "sensevoice" && asr.Endpoint != "") ||
-		(asr.Provider == "doubao" && asr.Endpoint == "" && asr.KeyConfigured)
-	if !ready {
+	if !asrReady(s.Settings.ASR) {
 		return result, errors.New("请先配置自建 SenseVoice 或豆包语音识别")
 	}
 	result.Stage = "capture"
@@ -301,7 +304,7 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 	}
 	result.Stage = "playback"
 	start = time.Now()
-	err = v.speak(ctx, reply)
+	err = p.playConfiguredSpeech(ctx, v, s, reply)
 	result.PlaybackMS = time.Since(start).Milliseconds()
 	if err != nil {
 		return result, err

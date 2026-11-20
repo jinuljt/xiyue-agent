@@ -55,6 +55,7 @@ func (p *Platform) deliverOne(parent context.Context, v *voiceRuntime, now time.
 		v.mu.Unlock()
 	}()
 	var claimed Event
+	var speech State
 	err := p.change(func(s *State) error {
 		for i := range s.Events {
 			e := &s.Events[i]
@@ -74,11 +75,12 @@ func (p *Platform) deliverOne(parent context.Context, v *voiceRuntime, now time.
 			if e.Delivery != "pending" {
 				continue
 			}
-			if claimed.ID == "" && s.Settings.TTS.Provider == "system" {
+			if !ttsReady(v, *s) {
+				e.Delivery = "unavailable"
+			} else if claimed.ID == "" {
 				e.Delivery = "playing"
 				claimed = *e
-			} else if s.Settings.TTS.Provider != "system" {
-				e.Delivery = "unavailable"
+				speech = *s
 			}
 		}
 		return nil
@@ -87,7 +89,7 @@ func (p *Platform) deliverOne(parent context.Context, v *voiceRuntime, now time.
 		return err
 	}
 	result := "delivered"
-	if err := v.speak(ctx, claimed.Text); err != nil {
+	if err := p.playConfiguredSpeech(ctx, v, speech, claimed.Text); err != nil {
 		result = "failed"
 	}
 	if ctx.Err() != nil {

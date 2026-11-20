@@ -259,3 +259,28 @@ func TestHybridRoutesOnlyTheExplicitRequest(t *testing.T) {
 		t.Fatal("each nonempty request should use exactly one service")
 	}
 }
+
+func TestServiceHealthReportsOnlyCurrentConfigurationResults(t *testing.T) {
+	config := defaultSettings()
+	a := &api{}
+	if got := a.serviceStatus(State{Settings: config}); got["asr"].State != "disabled" ||
+		got["tts"].State != "disabled" || got["llm"].State != "not_configured" {
+		t.Fatalf("unexpected initial status: %+v", got)
+	}
+	config.LLM.KeyConfigured = true
+	config.ASR = ServiceConfig{Provider: "sensevoice", Endpoint: "http://localhost/v1"}
+	a.voice = &voiceRuntime{last: &voiceResult{Revision: config.Revision, Stage: "playback"}}
+	state := State{Settings: config, Usage: []UsageRecord{
+		{ConfigRevision: config.Revision, Service: "llm", Success: true},
+		{ConfigRevision: config.Revision + 1, Service: "llm", Success: false},
+	}}
+	got := a.serviceStatus(state)
+	if got["asr"].State != "succeeded" || got["tts"].State != "failed" || got["llm"].State != "succeeded" {
+		t.Fatalf("unexpected verified status: %+v", got)
+	}
+	state.Settings.Revision++
+	got = a.serviceStatus(state)
+	if got["asr"].State != "configured" || got["tts"].State != "configured" || got["llm"].State != "failed" {
+		t.Fatalf("unexpected new revision status: %+v", got)
+	}
+}

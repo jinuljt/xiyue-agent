@@ -57,7 +57,8 @@ func (a *api) routes() http.Handler {
 	a.externalTaskRoutes(m)
 	m.HandleFunc("GET /api/state", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, a.platform.publicState()) })
 	m.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"name": "喜悦", "version": "0.2.0", "speech": "preview", "agent": "not_connected", "asr": "not_connected", "llm": "not_connected"})
+		writeJSON(w, 200, map[string]any{"name": "喜悦", "version": "0.2.0", "status": "running",
+			"services": a.serviceStatus(a.platform.publicState())})
 	})
 	m.HandleFunc("GET /api/tools", func(w http.ResponseWriter, r *http.Request) {
 		// The same manifests drive console forms and an eventual model tool adapter.
@@ -379,6 +380,9 @@ func main() {
 			log.Fatal("未找到可执行的音箱系统语音服务")
 		}
 		voice = &voiceRuntime{speak: speakSystem}
+		if _, err := exec.LookPath("aplay"); err == nil {
+			voice.playPCM = playALSA
+		}
 	}
 	host, _, err := net.SplitHostPort(*listen)
 	if err != nil {

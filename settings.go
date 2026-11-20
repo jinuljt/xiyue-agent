@@ -91,7 +91,7 @@ func providers() map[string][]Provider {
 		},
 		"tts": {
 			{ID: "system", Name: "音箱系统语音（推荐）", Note: "使用音箱系统语音服务，无需额外密钥。"},
-			{ID: "doubao", Name: "豆包语音合成", Note: "保存服务地址、音色与凭证；播报适配尚未接入。"},
+			{ID: "doubao", Name: "豆包语音合成", Model: doubaoDefaultVoice, Note: "输入音色 ID 和豆包语音 API Key。"},
 			{ID: "custom", Name: "其他语音合成服务", Note: "填写服务地址与音色；播报适配尚未接入。"},
 		},
 		"external": {{ID: "http_json", Name: "HTTP Agent 接口", Note: "填写支持喜悦 HTTP 接口的外部 Agent 地址；普通网页地址不能直接使用。"}},
@@ -419,6 +419,65 @@ func (p *Platform) respond(ctx context.Context, s State, message string, markTex
 	return reply, nil
 }
 
+type serviceStatus struct {
+	Provider string `json:"provider"`
+	State    string `json:"state"`
+}
+
+func (a *api) serviceStatus(s State) map[string]serviceStatus {
+	config := s.Settings
+	status := func(provider string, ready bool) serviceStatus {
+		state := "not_configured"
+		if ready {
+			state = "configured"
+		}
+		return serviceStatus{Provider: provider, State: state}
+	}
+	services := map[string]serviceStatus{
+		"asr": status(config.ASR.Provider, asrReady(config.ASR)),
+		"tts": status(config.TTS.Provider, ttsReady(a.voice, s)),
+		"llm": status(config.LLM.Provider, config.LLM.Endpoint != "" && config.LLM.Model != "" &&
+			(config.LLM.KeyConfigured || strings.HasPrefix(config.LLM.Provider, "custom"))),
+		"external": status(config.External.Provider, config.External.Endpoint != ""),
+	}
+	if a.voice == nil {
+		services["asr"] = serviceStatus{Provider: config.ASR.Provider, State: "disabled"}
+		services["tts"] = serviceStatus{Provider: config.TTS.Provider, State: "disabled"}
+	} else {
+		a.voice.mu.Lock()
+		if turn := a.voice.last; turn != nil && turn.Revision == config.Revision {
+			switch turn.Stage {
+			case "completed", "playback", "model", "local_task":
+				services["asr"] = serviceStatus{Provider: config.ASR.Provider, State: "succeeded"}
+			case "asr":
+				services["asr"] = serviceStatus{Provider: config.ASR.Provider, State: "failed"}
+			}
+			switch turn.Stage {
+			case "completed":
+				services["tts"] = serviceStatus{Provider: config.TTS.Provider, State: "succeeded"}
+			case "playback":
+				services["tts"] = serviceStatus{Provider: config.TTS.Provider, State: "failed"}
+			}
+		}
+		a.voice.mu.Unlock()
+	}
+	for i := len(s.Usage) - 1; i >= 0; i-- {
+		entry := s.Usage[i]
+		current := services[entry.Service]
+		if entry.ConfigRevision != config.Revision || (entry.Service != "llm" && entry.Service != "external") ||
+			(current.State != "configured" && current.State != "not_configured") {
+			continue
+		}
+		if entry.Success {
+			current.State = "succeeded"
+		} else {
+			current.State = "failed"
+		}
+		services[entry.Service] = current
+	}
+	return services
+}
+
 var bootTime = time.Now()
 
 func (a *api) settingsRoutes(m *http.ServeMux) {
@@ -455,19 +514,11 @@ func (a *api) settingsRoutes(m *http.ServeMux) {
 		s := a.platform.publicState()
 		var mem runtime.MemStats
 		runtime.ReadMemStats(&mem)
-		asr, tts := "not_integrated", "not_integrated"
-		if a.voice != nil {
-			asr, tts = "sensevoice_wav", "system_command"
-		}
 		writeJSON(w, 200, map[string]any{
-			"version": "0.2.0", "environment": "development", "device_connected": false, "voice_connected": false,
+			"version":        "0.2.0",
 			"uptime_seconds": int(time.Since(bootTime).Seconds()), "memory_bytes": mem.Alloc,
 			"platform": runtime.GOOS + "/" + runtime.GOARCH, "config_revision": s.Settings.Revision,
-			"services": map[string]any{
-				"asr": map[string]string{"runtime": asr}, "llm": map[string]string{"runtime": "text_preview"},
-				"tts": map[string]string{"runtime": tts}, "external": map[string]string{"runtime": "http_json_preview"},
-			},
-			"usage": s.Usage, "voice": a.voice.status(),
+			"services": a.serviceStatus(s), "usage": s.Usage, "voice": a.voice.status(),
 		})
 	})
 }
