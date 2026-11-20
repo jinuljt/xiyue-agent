@@ -234,6 +234,16 @@ func (a *api) routes() http.Handler {
 		}
 		writeJSON(w, 201, map[string]string{"id": sc.ID})
 	})
+	m.HandleFunc("POST /api/schedules/{id}/retry", func(w http.ResponseWriter, r *http.Request) {
+		err := a.platform.change(func(s *State) error {
+			return retrySchedule(s, r.PathValue("id"), time.Now().UTC())
+		})
+		if err != nil {
+			bad(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"saved": true})
+	})
 	m.HandleFunc("DELETE /api/schedules/{id}", func(w http.ResponseWriter, r *http.Request) {
 		err := a.platform.change(func(s *State) error {
 			for i, sc := range s.Schedules {

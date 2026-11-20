@@ -179,3 +179,54 @@ func TestHTTPGuardsAndStaleConfirmation(t *testing.T) {
 		t.Fatal("unknown field must be rejected")
 	}
 }
+
+func TestFailedOnceScheduleCanBeRetriedAfterRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	p, err := openPlatform(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC()
+	err = p.change(func(s *State) error {
+		a := s.Abilities["reminder"]
+		a.Enabled = false
+		s.Abilities["reminder"] = a
+		s.Schedules = append(s.Schedules, Schedule{ID: "once", AbilityID: "reminder", NextAt: at, Repeat: "once", Timezone: "Asia/Shanghai", Enabled: true, Inputs: map[string]string{"content": "测试提醒"}})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.tick(at); err != nil {
+		t.Fatal(err)
+	}
+	p, err = openPlatform(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := p.snapshot()
+	if !failed.Schedules[0].Enabled || failed.Schedules[0].Failure == "" || len(failed.Events) != 1 {
+		t.Fatal("failed plan should remain pending for manual retry after restart")
+	}
+	if err = p.tick(at.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.snapshot().Events) != 1 {
+		t.Fatal("blocked plan should not retry every tick")
+	}
+	if err = p.change(func(s *State) error {
+		a := s.Abilities["reminder"]
+		a.Enabled = true
+		s.Abilities["reminder"] = a
+		return retrySchedule(s, "once", at.Add(time.Minute))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err = p.change(func(s *State) error { return retrySchedule(s, "once", at.Add(2*time.Minute)) }); err == nil {
+		t.Fatal("second retry must not create another task")
+	}
+	final := p.snapshot()
+	if final.Schedules[0].Enabled || final.Schedules[0].Failure != "" || len(final.Tasks) != 1 {
+		t.Fatal("retry must create one task and clear the failure")
+	}
+}

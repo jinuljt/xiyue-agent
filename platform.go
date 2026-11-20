@@ -68,6 +68,7 @@ type Schedule struct {
 	Repeat    string            `json:"repeat"` // once, daily, weekdays
 	Timezone  string            `json:"timezone"`
 	Enabled   bool              `json:"enabled"`
+	Failure   string            `json:"failure,omitempty"`
 }
 type State struct {
 	Version   int                `json:"version"`
@@ -426,15 +427,17 @@ func tick(s *State, now time.Time) {
 	}
 	for i := range s.Schedules {
 		sc := &s.Schedules[i]
-		if !sc.Enabled || now.Before(sc.NextAt) {
+		if !scheduleDue(*sc, now) {
 			continue
 		}
 		_, err := startTask(s, sc.AbilityID, sc.Inputs, now)
+		sc.Failure = ""
 		if err != nil {
-			s.Events = append(s.Events, Event{ID: newID(), Kind: "error", Text: "定时任务未执行：" + err.Error(), At: now})
+			sc.Failure = err.Error()
+			s.Events = append(s.Events, Event{ID: newID(), Kind: "error", Text: "定时任务未执行：" + sc.Failure, At: now})
 		}
 		if sc.Repeat == "once" {
-			sc.Enabled = false
+			sc.Enabled = err != nil
 			continue
 		}
 		loc, _ := time.LoadLocation(sc.Timezone)
@@ -445,6 +448,29 @@ func tick(s *State, now time.Time) {
 		sc.NextAt = next
 	}
 }
+func scheduleDue(sc Schedule, now time.Time) bool {
+	return sc.Enabled && !(sc.Repeat == "once" && sc.Failure != "") && !now.Before(sc.NextAt)
+}
+
+func retrySchedule(s *State, id string, now time.Time) error {
+	for i := range s.Schedules {
+		sc := &s.Schedules[i]
+		if sc.ID != id {
+			continue
+		}
+		if !sc.Enabled || sc.Repeat != "once" || sc.Failure == "" {
+			return errors.New("只有执行失败的一次性计划可以重试")
+		}
+		if _, err := startTask(s, sc.AbilityID, sc.Inputs, now); err != nil {
+			return err
+		}
+		sc.Enabled = false
+		sc.Failure = ""
+		return nil
+	}
+	return errors.New("计划不存在")
+}
+
 func (p *Platform) tick(now time.Time) error {
 	// Avoid flash writes on every timer tick: persist only actual transitions.
 	p.mu.Lock()
@@ -455,7 +481,7 @@ func (p *Platform) tick(now time.Time) error {
 		}
 	}
 	for _, sc := range p.state.Schedules {
-		if sc.Enabled && !now.Before(sc.NextAt) {
+		if scheduleDue(sc, now) {
 			due = true
 		}
 	}
