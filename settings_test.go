@@ -166,3 +166,50 @@ func TestAbilitySecretFormStoresOnlyPresence(t *testing.T) {
 		t.Fatal("secret must not be spoken")
 	}
 }
+
+func TestAnthropicPreviewCompletesFirstSetup(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model     string
+			MaxTokens int `json:"max_tokens"`
+		}
+		if r.URL.Path != "/v1/messages" || r.Header.Get("x-api-key") != "test-credential" ||
+			r.Header.Get("anthropic-version") != "2023-06-01" || r.Header.Get("Authorization") != "" {
+			t.Error("incorrect Anthropic request")
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Model != "manually-entered-model" || body.MaxTokens != 512 {
+			t.Errorf("incorrect request body: %+v, %v", body, err)
+		}
+		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"reply"}],"usage":{"input_tokens":10,"output_tokens":3}}`)
+	}))
+	defer provider.Close()
+	p, err := openPlatform(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := settingsInput(p.snapshot().Settings)
+	input.LLM = ServiceInput{Provider: "custom_anthropic", Endpoint: provider.URL + "/v1", Model: "manually-entered-model", APIKey: "test-credential"}
+	if err := p.saveSettings(input); err != nil {
+		t.Fatal(err)
+	}
+	if p.snapshot().Settings.SetupComplete {
+		t.Fatal("saving must not dismiss the setup guide")
+	}
+	reply, err := p.chat(context.Background(), "hello")
+	if err != nil || reply != "reply" {
+		t.Fatalf("preview returned %q, %v", reply, err)
+	}
+	input = settingsInput(p.snapshot().Settings)
+	input.Name = "Updated"
+	if err := p.saveSettings(input); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openPlatform(p.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := reopened.snapshot()
+	if !state.Settings.SetupComplete || len(state.Usage) != 1 || state.Usage[0].InputTokens == nil || *state.Usage[0].InputTokens != 10 {
+		t.Fatal("setup completion and token usage must survive edits and reload")
+	}
+}

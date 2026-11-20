@@ -148,6 +148,12 @@ func openPlatform(path string) (*Platform, error) {
 		if p.state.Settings.Revision == 0 {
 			p.state.Settings = defaultSettings()
 		}
+		for _, record := range p.state.Usage {
+			if record.Success && record.ConfigRevision == p.state.Settings.Revision && (record.Service == "llm" || record.Service == "external") {
+				p.state.Settings.SetupComplete = true
+				break
+			}
+		}
 		return p, nil
 	}
 	if !os.IsNotExist(err) {

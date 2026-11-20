@@ -28,16 +28,17 @@ type ServiceConfig struct {
 	KeyConfigured bool   `json:"key_configured"`
 }
 type SystemConfig struct {
-	Revision  int           `json:"revision"`
-	Name      string        `json:"name"`
-	WakeWord  string        `json:"wake_word"`
-	Timezone  string        `json:"timezone"`
-	Mode      string        `json:"mode"`
-	ASR       ServiceConfig `json:"asr"`
-	LLM       ServiceConfig `json:"llm"`
-	TTS       ServiceConfig `json:"tts"`
-	External  ServiceConfig `json:"external"`
-	UpdatedAt *time.Time    `json:"updated_at,omitempty"`
+	Revision      int           `json:"revision"`
+	SetupComplete bool          `json:"setup_complete"`
+	Name          string        `json:"name"`
+	WakeWord      string        `json:"wake_word"`
+	Timezone      string        `json:"timezone"`
+	Mode          string        `json:"mode"`
+	ASR           ServiceConfig `json:"asr"`
+	LLM           ServiceConfig `json:"llm"`
+	TTS           ServiceConfig `json:"tts"`
+	External      ServiceConfig `json:"external"`
+	UpdatedAt     *time.Time    `json:"updated_at,omitempty"`
 }
 type ServiceInput struct {
 	Provider string `json:"provider"`
@@ -58,20 +59,29 @@ type SettingsInput struct {
 	External ServiceInput `json:"external"`
 }
 type Provider struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Endpoint string `json:"endpoint"`
-	Model    string `json:"model"`
-	Note     string `json:"note"`
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Endpoint string   `json:"endpoint"`
+	Model    string   `json:"model"`
+	Note     string   `json:"note"`
+	Models   []string `json:"models,omitempty"`
 }
 
 func providers() map[string][]Provider {
 	return map[string][]Provider{
 		"llm": {
-			{ID: "deepseek", Name: "DeepSeek", Endpoint: "https://api.deepseek.com", Model: "deepseek-flash", Note: "兼容 Chat Completions；使用自己的 API Key。"},
-			{ID: "doubao", Name: "豆包 · 火山方舟", Endpoint: "https://ark.cn-beijing.volces.com/api/v3", Note: "填写方舟控制台中的模型 ID / 接入点 ID。"},
-			{ID: "qwen", Name: "通义千问 · 阿里云百炼", Endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1", Note: "按账号地域填写服务地址和模型；可替换为工作空间专属地址。"},
-			{ID: "custom", Name: "其他 / 自定义兼容服务", Note: "填写兼容 Chat Completions 的 Base URL 和模型名称。"},
+			{ID: "deepseek", Name: "DeepSeek", Endpoint: "https://api.deepseek.com", Model: "deepseek-flash", Models: []string{"deepseek-flash", "deepseek-v4-pro"}, Note: "在 DeepSeek 开放平台创建 API Key。"},
+			{ID: "doubao", Name: "火山方舟（豆包）", Endpoint: "https://ark.cn-beijing.volces.com/api/v3", Models: []string{"doubao-seed-2-1-pro-260915"}, Note: "在方舟开通模型并创建 API Key。可填模型 ID 或接入点 ID。"},
+			{ID: "qwen", Name: "阿里云百炼（通义千问）", Endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1", Models: []string{"qwen-plus", "qwen-flash"}, Note: "在百炼创建 API Key，并确认服务地址与密钥所属地域一致。"},
+			{ID: "kimi", Name: "月之暗面（Kimi）", Endpoint: "https://api.moonshot.cn/v1", Models: []string{"kimi-k2.5"}, Note: "在 Kimi 开放平台创建 API Key。"},
+			{ID: "glm", Name: "智谱（GLM）", Endpoint: "https://open.bigmodel.cn/api/paas/v4", Models: []string{"glm-5.3"}, Note: "在智谱开放平台创建 API Key。使用编程套餐时按其文档填写地址。"},
+			{ID: "minimax", Name: "MiniMax", Endpoint: "https://api.minimax.cn/v1", Models: []string{"MiniMax-M3.1-Flash", "MiniMax-M3"}, Note: "在 MiniMax 开放平台创建 API Key，使用兼容 Chat Completions 的地址。"},
+			{ID: "hunyuan", Name: "腾讯混元（TokenHub）", Endpoint: "https://api.hunyuan.cloud.tencent.com/v1", Models: []string{"hy4-flash", "hunyuan-turbos-latest"}, Note: "在腾讯云 TokenHub 创建 API Key，并从模型广场复制调用名。"},
+			{ID: "openai", Name: "OpenAI", Endpoint: "https://api.openai.com/v1", Models: []string{"gpt-4.1-mini", "gpt-4.1"}, Note: "在 OpenAI API 平台为项目创建 API Key，并确认模型访问权限。"},
+			{ID: "anthropic", Name: "Anthropic（Claude）", Endpoint: "https://api.anthropic.com/v1", Models: []string{"claude-sonnet-4-6", "claude-haiku-4-5"}, Note: "在 Claude Console 创建 API Key。喜悦调用 Messages 接口。"},
+			{ID: "gemini", Name: "Google（Gemini）", Endpoint: "https://generativelanguage.googleapis.com/v1beta/openai", Models: []string{"gemini-4-hydrogen"}, Note: "在 Google AI Studio 创建 API Key。喜悦使用 Gemini 的 OpenAI 兼容接口。"},
+			{ID: "custom", Name: "自定义 · OpenAI Chat Completions", Note: "填写兼容接口的 Base URL 和模型 ID。"},
+			{ID: "custom_anthropic", Name: "自定义 · Anthropic Messages", Note: "填写兼容 Messages 的 Base URL 和模型 ID。"},
 		},
 		"asr": {
 			{ID: "doubao", Name: "豆包语音", Note: "填写豆包语音服务地址、资源 ID 和密钥。"},
@@ -183,7 +193,7 @@ func (p *Platform) saveSettings(in SettingsInput) error {
 		if s.Sealed == nil {
 			s.Sealed = map[string]string{}
 		}
-		next := SystemConfig{Revision: in.Revision + 1, Name: strings.TrimSpace(in.Name), WakeWord: strings.TrimSpace(in.WakeWord), Timezone: in.Timezone, Mode: in.Mode}
+		next := SystemConfig{SetupComplete: s.Settings.SetupComplete, Revision: in.Revision + 1, Name: strings.TrimSpace(in.Name), WakeWord: strings.TrimSpace(in.WakeWord), Timezone: in.Timezone, Mode: in.Mode}
 		for name, input := range map[string]ServiceInput{"asr": in.ASR, "llm": in.LLM, "tts": in.TTS, "external": in.External} {
 			known := false
 			for _, option := range providers()[name] {
@@ -266,9 +276,20 @@ func (p *Platform) chat(ctx context.Context, message string) (string, error) {
 	}
 	endpoint := config.Endpoint
 	var payload any = map[string]string{"message": message}
+	anthropic := service == "llm" && (config.Provider == "anthropic" || config.Provider == "custom_anthropic")
 	if service == "llm" {
-		endpoint += "/chat/completions"
-		payload = map[string]any{"model": config.Model, "stream": false, "max_tokens": 512, "messages": []map[string]string{{"role": "user", "content": message}}}
+		path := "/chat/completions"
+		params := map[string]any{"model": config.Model, "messages": []map[string]string{{"role": "user", "content": message}}}
+		if anthropic {
+			path = "/messages"
+			params["max_tokens"] = 512
+		} else if config.Provider == "openai" {
+			params["max_completion_tokens"] = 512
+		} else {
+			params["max_tokens"] = 512
+		}
+		endpoint += path
+		payload = params
 	}
 	var secret string
 	if sealed := s.Sealed["service:"+service]; sealed != "" {
@@ -291,7 +312,12 @@ func (p *Platform) chat(ctx context.Context, message string) (string, error) {
 		return "", errors.New("无法创建请求")
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if secret != "" {
+	if anthropic {
+		req.Header.Set("anthropic-version", "2023-06-01")
+		if secret != "" {
+			req.Header.Set("x-api-key", secret)
+		}
+	} else if secret != "" {
 		req.Header.Set("Authorization", "Bearer "+secret)
 	}
 	usage := UsageRecord{ConfigRevision: s.Settings.Revision, ID: newID(), Service: service, Provider: config.Provider, Model: config.Model, At: time.Now().UTC()}
@@ -311,6 +337,10 @@ func (p *Platform) chat(ctx context.Context, message string) (string, error) {
 				usage.ErrorCode = "invalid_response"
 			} else {
 				var result struct {
+					Content []struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"content"`
 					Reply   string `json:"reply"`
 					Choices []struct {
 						Message struct {
@@ -318,8 +348,10 @@ func (p *Platform) chat(ctx context.Context, message string) (string, error) {
 						} `json:"message"`
 					} `json:"choices"`
 					Usage *struct {
-						Input  *int64 `json:"prompt_tokens"`
-						Output *int64 `json:"completion_tokens"`
+						Input        *int64 `json:"prompt_tokens"`
+						Output       *int64 `json:"completion_tokens"`
+						NativeInput  *int64 `json:"input_tokens"`
+						NativeOutput *int64 `json:"output_tokens"`
 					} `json:"usage"`
 				}
 				if e = json.Unmarshal(data, &result); e != nil {
@@ -327,12 +359,21 @@ func (p *Platform) chat(ctx context.Context, message string) (string, error) {
 				} else {
 					if service == "external" {
 						reply = result.Reply
+					} else if anthropic {
+						for _, part := range result.Content {
+							if part.Type == "text" {
+								reply += part.Text
+							}
+						}
 					} else if len(result.Choices) > 0 {
 						reply = result.Choices[0].Message.Content
 					}
 					if result.Usage != nil {
 						usage.InputTokens = result.Usage.Input
 						usage.OutputTokens = result.Usage.Output
+						if anthropic {
+							usage.InputTokens, usage.OutputTokens = result.Usage.NativeInput, result.Usage.NativeOutput
+						}
 					}
 					if strings.TrimSpace(reply) == "" {
 						usage.ErrorCode = "empty_response"
@@ -343,7 +384,13 @@ func (p *Platform) chat(ctx context.Context, message string) (string, error) {
 	}
 	usage.DurationMS = time.Since(start).Milliseconds()
 	usage.Success = usage.ErrorCode == ""
-	if err = p.change(func(s *State) error { s.Usage = append(s.Usage, usage); return nil }); err != nil {
+	if err = p.change(func(s *State) error {
+		s.Usage = append(s.Usage, usage)
+		if usage.Success && s.Settings.Revision == usage.ConfigRevision {
+			s.Settings.SetupComplete = true
+		}
+		return nil
+	}); err != nil {
 		return "", errors.New("调用结束，但用量记录未能保存，请检查存储")
 	}
 	if !usage.Success {
