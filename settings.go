@@ -74,12 +74,12 @@ func providers() map[string][]Provider {
 			{ID: "custom", Name: "其他 / 自定义兼容服务", Note: "填写兼容 Chat Completions 的 Base URL 和模型名称。"},
 		},
 		"asr": {
-			{ID: "doubao", Name: "豆包语音", Note: "保存接入信息；豆包流式 ASR 适配尚未接入，本页不会宣称已连接。"},
-			{ID: "sensevoice", Name: "自建 SenseVoice", Note: "填写你部署的识别服务地址；录音与识别链路尚未接入。"},
+			{ID: "doubao", Name: "豆包语音", Note: "填写豆包语音服务地址、资源 ID 和密钥。"},
+			{ID: "sensevoice", Name: "自建 SenseVoice", Note: "填写你部署的 SenseVoice 服务地址。"},
 			{ID: "custom", Name: "其他语音识别服务", Note: "保存服务地址与接入凭证，协议适配需另行接入。"},
 		},
 		"tts": {
-			{ID: "system", Name: "音箱系统语音（推荐）", Note: "无需额外密钥；将在连接音箱后调用系统语音服务。"},
+			{ID: "system", Name: "音箱系统语音（推荐）", Note: "使用音箱系统语音服务，无需额外密钥。"},
 			{ID: "doubao", Name: "豆包语音合成", Note: "保存服务地址、音色与凭证；播报适配尚未接入。"},
 			{ID: "custom", Name: "其他语音合成服务", Note: "填写服务地址与音色；播报适配尚未接入。"},
 		},
