@@ -59,6 +59,11 @@ func TestExternalTaskBindingAndIdempotencyHeader(t *testing.T) {
 	if len(p.snapshot().ExternalTasks) != 1 {
 		t.Fatal("duplicate task reference")
 	}
+	in = settingsInput(p.snapshot().Settings)
+	in.Mode = "hybrid"
+	if err = p.saveSettings(in); err != nil {
+		t.Fatal(err)
+	}
 	p, err = openPlatform(path)
 	if err != nil {
 		t.Fatal(err)

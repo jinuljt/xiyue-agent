@@ -32,8 +32,8 @@ type externalTaskStatus struct {
 
 func connectorTasks(s State) (string, string, error) {
 	cfg := s.Settings.External
-	if s.Settings.Mode != "external" || cfg.Provider != "http_json" {
-		return "", "", errors.New("请先选择并保存仅使用外部 Agent 模式")
+	if (s.Settings.Mode != "external" && s.Settings.Mode != "hybrid") || cfg.Provider != "http_json" {
+		return "", "", errors.New("请先启用外部 Agent 或组合模式")
 	}
 	if validateEndpoint(cfg.Endpoint) != nil || !strings.HasSuffix(cfg.Endpoint, "/v1/chat") {
 		return "", "", errors.New("后台任务需要以 /v1/chat 结尾的喜悦连接器地址")
