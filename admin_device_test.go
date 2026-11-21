@@ -81,16 +81,16 @@ func TestDeviceLoginBindsApprovalAndChangesPassword(t *testing.T) {
 	if w := call("POST", "device/claim", "{}", browser); w.Code != 404 {
 		t.Fatal("approval was claimable more than once")
 	}
-	if w := call("POST", "password", `{"password":"fixture-new-password"}`); w.Code != 401 {
+	if w := call("POST", "password", `{"password":"q"}`); w.Code != 401 {
 		t.Fatal("anonymous password change was allowed")
 	}
-	changed := call("POST", "password", `{"password":"fixture-new-password"}`, login)
+	changed := call("POST", "password", `{"password":"q"}`, login)
 	if changed.Code != 200 {
 		t.Fatalf("password update returned %d: %s", changed.Code, changed.Body.String())
 	}
 	rotated := changed.Result().Cookies()[0]
 	stored := p.snapshot()
-	newHash, err := passwordHash("fixture-new-password", stored.Owner.PasswordSalt)
+	newHash, err := passwordHash("q", stored.Owner.PasswordSalt)
 	if err != nil || !bytes.Equal(newHash, stored.Owner.PasswordHash) || stored.Owner.SessionDigest != digest(rotated.Value) ||
 		stored.Owner.SessionDigest == digest(login.Value) || stored.Settings.Name != "fixture unchanged" {
 		t.Fatal("password update failed to rotate the session or mutated settings")

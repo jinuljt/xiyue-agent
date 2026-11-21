@@ -70,7 +70,7 @@ func (r *ownerRequest) valid() bool {
 	r.Username = strings.TrimSpace(r.Username)
 	return r.Username != "" && len(r.Username) <= 64 &&
 		!strings.ContainsFunc(r.Username, func(c rune) bool { return unicode.IsSpace(c) || unicode.IsControl(c) }) &&
-		len(r.Password) <= 256
+		r.Password != "" && len(r.Password) <= 256
 }
 
 func (a *api) authenticateOwner(w http.ResponseWriter, r *http.Request) {
@@ -154,8 +154,8 @@ func (a *api) changeOwnerPassword(w http.ResponseWriter, r *http.Request) {
 		bad(w, err)
 		return
 	}
-	if len([]rune(in.Password)) < 12 || len(in.Password) > 256 {
-		bad(w, errors.New("请使用至少 12 个字符的密码"))
+	if in.Password == "" || len(in.Password) > 256 {
+		bad(w, errors.New("请填写新密码"))
 		return
 	}
 	g.mu.Lock()

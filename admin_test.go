@@ -31,7 +31,10 @@ func TestInstallerSetsAdministratorOnceAndLoginSurvivesRestart(t *testing.T) {
 	defer cancel()
 	go p.serveOwnerSetup(ctx, listener)
 
-	const account = `{"username":"owner","password":"fictional-first-password"}`
+	const account = `{"username":"owner","password":"x"}`
+	if err := sendOwnerSetup(socket, strings.NewReader(`{"username":"owner","password":""}`)); err == nil {
+		t.Fatal("empty password was accepted")
+	}
 	if err := sendOwnerSetup(socket, strings.NewReader(account)); err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +93,7 @@ func TestInstallerSetsAdministratorOnceAndLoginSurvivesRestart(t *testing.T) {
 	if w := call("POST", "/api/session/login", "https://"+host, account, nil); w.Code != 200 {
 		t.Fatalf("password login after restart got %d", w.Code)
 	}
-	if raw, err := os.ReadFile(path); err != nil || strings.Contains(string(raw), "fictional-first-password") {
+	if raw, err := os.ReadFile(path); err != nil || strings.Contains(string(raw), `"password": "x"`) {
 		t.Fatal("plaintext credential persisted")
 	}
 }

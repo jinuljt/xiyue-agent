@@ -16,8 +16,8 @@ import (
 const ownerSetupLimit = 4096
 
 func (p *Platform) provisionOwner(r ownerRequest) error {
-	if !r.valid() || len([]rune(r.Password)) < 12 {
-		return errors.New("请输入有效用户名和至少 12 个字符的密码")
+	if !r.valid() {
+		return errors.New("请输入有效的管理员用户名和密码")
 	}
 	return p.change(func(s *State) error {
 		if current := s.Owner; current != nil && len(current.PasswordHash) == 32 {
