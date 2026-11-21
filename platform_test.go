@@ -230,3 +230,23 @@ func TestFailedOnceScheduleCanBeRetriedAfterRestart(t *testing.T) {
 		t.Fatal("retry must create one task and clear the failure")
 	}
 }
+
+func TestScheduleLocalTimeUsesSpeakerTimezone(t *testing.T) {
+	for _, tt := range []struct{ value, zone, want string }{
+		{"2026-11-21T09:00", "Asia/Shanghai", "2026-11-21T01:00:00Z"},
+		{"2026-11-21T09:00", "America/New_York", "2026-11-21T14:00:00Z"},
+		{"2026-11-01T01:30", "America/New_York", "2026-11-01T05:30:00Z"},
+		{"2026-03-08T02:30", "America/New_York", ""},
+	} {
+		got, err := scheduleLocalTime(tt.value, tt.zone)
+		if tt.want == "" {
+			if err == nil {
+				t.Fatalf("accepted missing daylight-saving time: %s", tt.value)
+			}
+			continue
+		}
+		if err != nil || got.Format(time.RFC3339) != tt.want {
+			t.Fatalf("%s (%s) became %v (%v), want %s", tt.value, tt.zone, got, err, tt.want)
+		}
+	}
+}

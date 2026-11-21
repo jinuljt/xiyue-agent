@@ -420,6 +420,26 @@ func taskAction(s *State, id, action string, now time.Time) error {
 	}
 	return errors.New("任务不存在")
 }
+func scheduleLocalTime(value, timezone string) (time.Time, error) {
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		return time.Time{}, errors.New("音箱时区无效")
+	}
+	const layout = "2006-01-02T15:04"
+	t, err := time.ParseInLocation(layout, value, loc)
+	if err != nil || t.Format(layout) != value {
+		return time.Time{}, errors.New("这个时间在音箱时区不存在，请重新选择")
+	}
+	// Prefer the earlier occurrence when the local clock repeats.
+	_, offset := t.Zone()
+	_, previous := t.Add(-24 * time.Hour).Zone()
+	earlier := t.Add(time.Duration(offset-previous) * time.Second)
+	if earlier.Before(t) && earlier.Format(layout) == value {
+		t = earlier
+	}
+	return t.UTC(), nil
+}
+
 func validateSchedule(s *State, sc Schedule, now time.Time) error {
 	a, ok := s.Abilities[sc.AbilityID]
 	if !ok || !a.Enabled {

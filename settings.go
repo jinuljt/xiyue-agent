@@ -510,6 +510,29 @@ func (a *api) settingsRoutes(m *http.ServeMux) {
 		}
 		writeJSON(w, 200, map[string]string{"reply": reply})
 	})
+	m.HandleFunc("POST /api/settings/verify", func(w http.ResponseWriter, r *http.Request) {
+		var in struct{ Service string }
+		if err := decode(w, r, &in); err != nil {
+			bad(w, err)
+			return
+		}
+		s := a.platform.snapshot()
+		switch in.Service {
+		case "llm":
+			s.Settings.Mode = "direct"
+		case "external":
+			s.Settings.Mode = "external"
+		default:
+			bad(w, errors.New("未知验证服务"))
+			return
+		}
+		start := time.Now()
+		if _, err := a.platform.respond(r.Context(), s, "这是连接验证，请只回复 OK。", true); err != nil {
+			bad(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "duration_ms": time.Since(start).Milliseconds()})
+	})
 	m.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		s := a.platform.publicState()
 		var mem runtime.MemStats
@@ -518,6 +541,8 @@ func (a *api) settingsRoutes(m *http.ServeMux) {
 			"version":        "0.2.0",
 			"uptime_seconds": int(time.Since(bootTime).Seconds()), "memory_bytes": mem.Alloc,
 			"platform": runtime.GOOS + "/" + runtime.GOARCH, "config_revision": s.Settings.Revision,
+			"device": map[string]string{"model": a.deviceModel, "firmware": a.deviceFirmware,
+				"name": map[string]string{"OH2P": "Xiaomi 智能音箱 Pro"}[strings.ToUpper(a.deviceModel)]},
 			"services": a.serviceStatus(s), "usage": s.Usage, "voice": a.voice.status(),
 		})
 	})

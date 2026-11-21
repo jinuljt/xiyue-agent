@@ -24,10 +24,11 @@ import (
 )
 
 type api struct {
-	platform *Platform
-	assets   map[string][]byte
-	voice    *voiceRuntime
-	admin    *adminGate
+	deviceModel, deviceFirmware string
+	platform                    *Platform
+	assets                      map[string][]byte
+	voice                       *voiceRuntime
+	admin                       *adminGate
 }
 
 func decode(w http.ResponseWriter, r *http.Request, out any) error {
@@ -219,6 +220,7 @@ func (a *api) routes() http.Handler {
 			AbilityID string            `json:"ability_id"`
 			Inputs    map[string]string `json:"inputs"`
 			NextAt    time.Time         `json:"next_at"`
+			LocalTime string            `json:"local_time"`
 			Repeat    string            `json:"repeat"`
 			Timezone  string            `json:"timezone"`
 		}
@@ -230,6 +232,17 @@ func (a *api) routes() http.Handler {
 		err := a.platform.change(func(s *State) error {
 			if len(s.Schedules) >= 100 {
 				return errors.New("定时计划不能超过100条")
+			}
+			if in.LocalTime != "" {
+				if !in.NextAt.IsZero() || in.Timezone != "" {
+					return errors.New("请只提交音箱本地时间")
+				}
+				var err error
+				sc.Timezone = s.Settings.Timezone
+				sc.NextAt, err = scheduleLocalTime(in.LocalTime, sc.Timezone)
+				if err != nil {
+					return err
+				}
 			}
 			if err := validateSchedule(s, sc, time.Now()); err != nil {
 				return err
@@ -366,6 +379,8 @@ func main() {
 	buttonInput := flag.String("admin-button-device", "", "音箱确认按键的 Linux evdev 路径")
 	buttonKey := flag.Uint("admin-button-key", 0, "已验证用于登录的实体键 EV_KEY 编号")
 	buttonLabel := flag.String("admin-button-label", "", "控制台显示的实体按键名称")
+	deviceModel := flag.String("device-model", "", "安装时核对的音箱型号")
+	deviceFirmware := flag.String("device-firmware", "", "安装时核对的设备固件版本")
 	flag.Parse()
 	if *provisionAdmin {
 		if err := sendOwnerSetup(*installSocket, os.Stdin); err != nil {
@@ -531,7 +546,7 @@ func main() {
 			}
 		}
 	}()
-	server := &http.Server{Handler: (&api{platform: p, assets: assets, voice: voice, admin: admin}).routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 55 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	server := &http.Server{Handler: (&api{platform: p, assets: assets, voice: voice, admin: admin, deviceModel: *deviceModel, deviceFirmware: *deviceFirmware}).routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 55 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
