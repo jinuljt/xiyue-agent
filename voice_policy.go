@@ -1,0 +1,118 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"regexp"
+	"strings"
+	"time"
+	"unicode/utf8"
+)
+
+const speakerInstructions = `你是喜悦 Voice 音箱的语音助手。根据用户这一轮的完整意图，仅返回一个 JSON 对象，不要使用代码块：
+{"action":"speak","speech":"可以直接播报的文字"}
+语音先说结论，日常默认一两句，目标约 8 秒。省略寒暄、复述、套话、Markdown 和括号旁白。用户明确要求详细说明时可分短句展开。保留重要数字、单位和条件。
+用户确实想结束当前对话时返回 {"action":"end"}。引用、询问退出方式、拒绝某个操作后继续提问，均继续正常对话。
+用户明确要求设置倒计时时返回 {"action":"countdown","seconds":秒数}。明确要求在一段时间后提醒时返回 {"action":"reminder","seconds":秒数,"content":"要提醒的事情"}。参数缺失时只用 speak 简短追问缺的参数。用户明确确认继续当前已暂停等待确认的步骤时返回 {"action":"next_step"}。
+只返回一种动作。询问、假设、多项指令或指令含糊时不要发起设备动作。请勿承诺尚未执行的操作。缺少实时信息时如实说明。`
+
+var endDialogue = regexp.MustCompile(`^(?:(?:谢谢|好了|好|行)[，,\s]*)?(?:请|那就|我们)?(?:先)?(?:结束(?:对话|聊天)|退出(?:对话|聊天)?|不聊|不用(?:再|继续)聊|(?:今天|这次)?(?:就这样|到这(?:里|儿))|下次再聊|再见|拜拜)(?:了|吧|啦)?$`)
+var detailedSpeech = regexp.MustCompile(`详细|展开|细说|一步步|多说点|再多讲`)
+var hypotheticalTask = regexp.MustCompile(`^(?:请|你能)?(?:说说|解释|举例|如何|怎么|怎样|如果|假如|不要|不用)`)
+
+type voicePlan struct {
+	Action  string `json:"action"`
+	Speech  string `json:"speech,omitempty"`
+	Seconds int    `json:"seconds,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
+func parseVoicePlan(reply string) (voicePlan, error) {
+	raw := strings.TrimSpace(reply)
+	if fenced, ok := strings.CutPrefix(raw, "```json"); ok {
+		raw = strings.TrimSpace(strings.TrimSuffix(fenced, "```"))
+	}
+	if !strings.HasPrefix(raw, "{") {
+		return voicePlan{Action: "speak", Speech: raw}, nil
+	}
+	var plan voicePlan
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&plan); err != nil || decoder.Decode(new(any)) != io.EOF {
+		return voicePlan{}, errors.New("语音回复格式无效")
+	}
+	switch plan.Action {
+	case "speak", "end", "countdown", "reminder", "next_step":
+		return plan, nil
+	default:
+		return voicePlan{}, errors.New("语音回复动作无效")
+	}
+}
+
+func (p *Platform) applyVoicePlan(plan voicePlan, request string, now time.Time) (voiceTaskReply, error) {
+	if plan.Action != "speak" && hypotheticalTask.MatchString(request) {
+		return voiceTaskReply{text: "你想让我实际执行吗？", handled: true}, nil
+	}
+	switch plan.Action {
+	case "countdown", "reminder":
+		if plan.Seconds < 1 || plan.Seconds > 86400 {
+			return voiceTaskReply{text: "请说清楚时长，最多一天。", handled: true}, nil
+		}
+		content := strings.TrimSpace(plan.Content)
+		ability := "reminder"
+		if plan.Action == "countdown" {
+			content, ability = "计时结束。", quickTimer.ID
+		}
+		if content == "" || len(content) > 2000 {
+			return voiceTaskReply{text: "要提醒什么事？", handled: true}, nil
+		}
+		err := p.scheduleVoiceTask(ability, content, time.Duration(plan.Seconds)*time.Second, now)
+		return voiceTaskReply{text: "已设置。", handled: true, timer: plan.Action == "countdown"}, err
+	case "next_step":
+		return p.voiceTask("继续下一步", now)
+	default:
+		return voiceTaskReply{text: plan.Speech, handled: true}, nil
+	}
+}
+
+func speechForSpeaker(text, request string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "我没听明白，请再说一遍。"
+	}
+	maxSentences, maxRunes := 2, 56
+	if detailedSpeech.MatchString(request) {
+		maxSentences, maxRunes = 6, 320
+	}
+	sentences, runes, lastEnd := 0, 0, 0
+	for index, char := range text {
+		runes++
+		if runes > maxRunes {
+			break
+		}
+		// Full stops adjacent to ASCII digits or letters can be decimals and abbreviations.
+		punctuation := strings.ContainsRune("。！？!?", char)
+		if char == '.' && (index+1 == len(text) || text[index+1] == ' ' || text[index+1] == '\n') {
+			punctuation = true
+		}
+		if punctuation {
+			if lastEnd == index {
+				lastEnd = index + utf8.RuneLen(char)
+				continue
+			}
+			sentences++
+			lastEnd = index + utf8.RuneLen(char)
+			if sentences >= maxSentences {
+				return strings.TrimSpace(text[:lastEnd])
+			}
+		}
+	}
+	if runes <= maxRunes {
+		return text
+	}
+	if lastEnd > 0 {
+		return strings.TrimSpace(text[:lastEnd])
+	}
+	return "这段内容比较长，你想先听哪一部分？"
+}

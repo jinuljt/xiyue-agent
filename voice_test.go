@@ -86,7 +86,7 @@ func TestVoiceTurnUsesConfiguredASRAndModelBeforePlayback(t *testing.T) {
 }
 
 func TestDeviceDialogueUsesOneWakeCueAndRetainsModelContext(t *testing.T) {
-	transcripts := []string{"我叫测试", "我叫什么", "结束对话"}
+	transcripts := []string{"我叫测试", "我叫什么", "退出吧。"}
 	var turns [][]voiceMessage
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -137,8 +137,9 @@ func TestDeviceDialogueUsesOneWakeCueAndRetainsModelContext(t *testing.T) {
 		},
 	}
 	p.runDeviceWake(context.Background(), v, capture, nil)
-	if cues != 1 || spoke != 2 || following != 2 || len(turns) != 2 || len(turns[1]) != 3 ||
-		turns[1][0].Content != "我叫测试" || turns[1][1].Role != "assistant" || turns[1][2].Content != "我叫什么" {
+	if cues != 1 || spoke != 2 || following != 2 || len(turns) != 2 || len(turns[1]) != 4 ||
+		turns[1][0].Content != speakerInstructions || turns[1][1].Content != "我叫测试" ||
+		turns[1][2].Role != "assistant" || turns[1][3].Content != "我叫什么" {
 		t.Fatalf("unexpected dialogue: cues=%d replies=%d follow-ups=%d history=%v", cues, spoke, following, turns)
 	}
 	if v.last.Stage != "conversation_ended" {

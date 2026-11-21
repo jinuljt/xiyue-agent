@@ -320,6 +320,7 @@ type replyOptions struct {
 	transientKey  *string
 	draft         bool
 	history       []voiceMessage
+	voicePlan     *voicePlan
 }
 
 type voiceMessage struct {
@@ -360,10 +361,16 @@ func (p *Platform) requestReply(ctx context.Context, s State, message string, op
 	if service == "llm" {
 		path := "/chat/completions"
 		history := append([]voiceMessage{}, options.history...)
+		if options.voicePlan != nil && !anthropic {
+			history = append([]voiceMessage{{"system", speakerInstructions}}, history...)
+		}
 		params := map[string]any{"model": config.Model, "messages": append(history, voiceMessage{"user", message})}
 		if anthropic {
 			path = "/messages"
 			params["max_tokens"] = 512
+			if options.voicePlan != nil {
+				params["system"] = speakerInstructions
+			}
 		} else if config.Provider == "openai" {
 			params["max_completion_tokens"] = 512
 		} else {
@@ -496,6 +503,13 @@ func (p *Platform) requestReply(ctx context.Context, s State, message string, op
 	}
 	if !usage.Success {
 		return "", fmt.Errorf("服务调用失败（%s）；请检查地址、密钥、模型和服务额度", usage.ErrorCode)
+	}
+	if service == "llm" && options.voicePlan != nil {
+		plan, err := parseVoicePlan(reply)
+		if err != nil {
+			plan = voicePlan{Action: "speak", Speech: "我没听明白，请再说一遍。"}
+		}
+		*options.voicePlan = plan
 	}
 	return reply, nil
 }

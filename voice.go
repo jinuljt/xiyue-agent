@@ -383,10 +383,12 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 		return result, nil
 	}
 	transcript = text
-	switch strings.TrimRight(strings.TrimSpace(command), "。！？.!?") {
-	case "结束对话", "退出对话", "再见":
+	command = strings.TrimRight(strings.TrimSpace(command), "。！？.!? ")
+	if endDialogue.MatchString(command) {
 		result.Stage = "conversation_ended"
 		return result, nil
+	}
+	switch command {
 	case "停止响铃", "关闭闹铃", "停止":
 		if v.stopAlarm() {
 			result.Stage = "alarm_stopped"
@@ -400,7 +402,7 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 	result.Stage = "local_task"
 	taskReply, err := p.voiceTask(command, time.Now().UTC())
 	if err != nil {
-		return result, err
+		taskReply = voiceTaskReply{text: "这次没执行成功，请稍后再试。", handled: true}
 	}
 	reply := taskReply.text
 	if !taskReply.handled {
@@ -411,11 +413,27 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 		if history != nil {
 			previous = *history
 		}
-		reply, err = p.requestReply(ctx, s, text, replyOptions{history: previous})
+		var plan voicePlan
+		reply, err = p.requestReply(ctx, s, text, replyOptions{history: previous, voicePlan: &plan})
 		result.ModelMS = time.Since(start).Milliseconds()
 		if err != nil {
 			return result, err
 		}
+		if plan.Action == "end" {
+			if !hypotheticalTask.MatchString(command) {
+				result.Stage = "conversation_ended"
+				return result, nil
+			}
+			plan = voicePlan{Action: "speak", Speech: "想结束时，直接说今天先这样就可以。"}
+		}
+		if plan.Action != "" {
+			taskReply, err = p.applyVoicePlan(plan, command, time.Now().UTC())
+			if err != nil {
+				taskReply = voiceTaskReply{text: "这次没执行成功，请稍后再试。"}
+			}
+			reply = taskReply.text
+		}
+		reply = speechForSpeaker(reply, command)
 	}
 	result.Stage = "playback"
 	response = reply

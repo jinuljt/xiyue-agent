@@ -101,7 +101,14 @@ func (p *Platform) voiceTask(text string, now time.Time) (voiceTaskReply, error)
 	if content == "" || len(content) > 2000 {
 		return voiceTaskReply{text: "请简短说出要提醒的事情。", handled: true}, nil
 	}
-	err := p.change(func(s *State) error {
+	if err := p.scheduleVoiceTask(ability, content, duration, now); err != nil {
+		return voiceTaskReply{handled: true}, err
+	}
+	return voiceTaskReply{text: fmt.Sprintf("好的，已设定%s%s。", match[1], match[2]), handled: true, timer: ability == quickTimer.ID}, nil
+}
+
+func (p *Platform) scheduleVoiceTask(ability, content string, duration time.Duration, now time.Time) error {
+	return p.change(func(s *State) error {
 		if ability == quickTimer.ID {
 			kept := s.Schedules[:0]
 			for _, schedule := range s.Schedules {
@@ -128,10 +135,6 @@ func (p *Platform) voiceTask(text string, now time.Time) (voiceTaskReply, error)
 		s.Schedules = append(s.Schedules, sc)
 		return nil
 	})
-	if err != nil {
-		return voiceTaskReply{handled: true}, err
-	}
-	return voiceTaskReply{text: fmt.Sprintf("好的，已设定%s%s。", match[1], match[2]), handled: true, timer: ability == quickTimer.ID}, nil
 }
 
 var errNoVoiceChange = errors.New("没有要保存的语音任务变更")
