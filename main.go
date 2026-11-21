@@ -381,6 +381,7 @@ func main() {
 	buttonLabel := flag.String("admin-button-label", "", "控制台显示的实体按键名称")
 	deviceModel := flag.String("device-model", "", "安装时核对的音箱型号")
 	deviceFirmware := flag.String("device-firmware", "", "安装时核对的设备固件版本")
+	outputDevice := flag.String("audio-playback-device", "", "豆包语音使用的 ALSA 输出设备")
 	flag.Parse()
 	if *provisionAdmin {
 		if err := sendOwnerSetup(*installSocket, os.Stdin); err != nil {
@@ -409,7 +410,16 @@ func main() {
 		}
 		voice = &voiceRuntime{speak: speakSystem}
 		if _, err := exec.LookPath("aplay"); err == nil {
-			voice.playPCM = playALSA
+			device := *outputDevice
+			if device == "" {
+				device = "default"
+				if strings.EqualFold(*deviceModel, "OH2P") {
+					device = "Playback"
+				}
+			}
+			voice.playPCM = func(ctx context.Context, audio io.Reader) error {
+				return playALSA(ctx, device, audio)
+			}
 		}
 	}
 	host, _, err := net.SplitHostPort(*listen)

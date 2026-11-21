@@ -250,3 +250,20 @@ func TestScheduleLocalTimeUsesSpeakerTimezone(t *testing.T) {
 		}
 	}
 }
+
+func TestCalendarClockSurvivesMissingAndRepeatedHours(t *testing.T) {
+	const zone = "America/New_York"
+	for _, tt := range []struct{ prior, want string }{
+		{"2026-03-07T02:30", "2026-03-09T06:30:00Z"},
+		{"2026-10-31T01:30", "2026-11-01T05:30:00Z"},
+	} {
+		from, err := scheduleLocalTime(tt.prior, zone)
+		if err != nil {
+			t.Fatal(err)
+		}
+		at, err := nextCalendarRun(Schedule{NextAt: from, Timezone: zone, Repeat: "daily"}, from)
+		if err != nil || at.Format(time.RFC3339) != tt.want {
+			t.Fatalf("recurrence after %s became %v (%v), want %s", tt.prior, at, err, tt.want)
+		}
+	}
+}

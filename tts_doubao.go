@@ -20,8 +20,8 @@ const (
 
 type pcmPlayer func(context.Context, io.Reader) error
 
-func playALSA(ctx context.Context, audio io.Reader) error {
-	cmd := exec.CommandContext(ctx, "aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", "24000", "-c", "1")
+func playALSA(ctx context.Context, device string, audio io.Reader) error {
+	cmd := exec.CommandContext(ctx, "aplay", "-q", "-D", device, "-t", "raw", "-f", "S16_LE", "-r", "24000", "-c", "1")
 	cmd.Stdin = audio
 	if err := cmd.Run(); err != nil {
 		return errors.New("音箱 PCM 播放失败或超时")

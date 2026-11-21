@@ -425,7 +425,10 @@ func scheduleLocalTime(value, timezone string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, errors.New("音箱时区无效")
 	}
-	const layout = "2006-01-02T15:04"
+	return resolveScheduleTime(value, loc, "2006-01-02T15:04")
+}
+
+func resolveScheduleTime(value string, loc *time.Location, layout string) (time.Time, error) {
 	t, err := time.ParseInLocation(layout, value, loc)
 	if err != nil || t.Format(layout) != value {
 		return time.Time{}, errors.New("这个时间在音箱时区不存在，请重新选择")
@@ -488,14 +491,39 @@ func tick(s *State, now time.Time) {
 			sc.Enabled = err != nil
 			continue
 		}
-		loc, _ := time.LoadLocation(sc.Timezone)
-		next := sc.NextAt.In(loc)
-		for !next.After(now) || (sc.Repeat == "weekdays" && (next.Weekday() == time.Saturday || next.Weekday() == time.Sunday)) {
-			next = next.AddDate(0, 0, 1)
+		sc.NextAt, err = nextCalendarRun(*sc, now)
+		if err != nil {
+			sc.Enabled = false
+			sc.Failure = err.Error()
 		}
-		sc.NextAt = next
 	}
 }
+func nextCalendarRun(sc Schedule, now time.Time) (time.Time, error) {
+	loc, err := time.LoadLocation(sc.Timezone)
+	if err != nil {
+		return sc.NextAt, errors.New("计划时区无效")
+	}
+	prev := sc.NextAt.In(loc)
+	today := now.In(loc)
+	// Advance calendar dates independently of clock transitions.
+	day := time.Date(prev.Year(), prev.Month(), prev.Day()+1, 0, 0, 0, 0, time.UTC)
+	todayDate := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
+	if day.Before(todayDate) {
+		day = todayDate
+	}
+	const date = "2006-01-02"
+	const clock = "15:04:05.999999999"
+	for ; ; day = day.AddDate(0, 0, 1) {
+		if sc.Repeat == "weekdays" && (day.Weekday() == time.Saturday || day.Weekday() == time.Sunday) {
+			continue
+		}
+		next, err := resolveScheduleTime(day.Format(date)+"T"+prev.Format(clock), loc, date+"T"+clock)
+		if err == nil && next.After(now) {
+			return next, nil
+		}
+	}
+}
+
 func scheduleDue(sc Schedule, now time.Time) bool {
 	return sc.Enabled && !(sc.Repeat == "once" && sc.Failure != "") && !now.Before(sc.NextAt)
 }
