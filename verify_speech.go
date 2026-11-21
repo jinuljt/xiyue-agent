@@ -46,13 +46,13 @@ func (a *api) verifySpeech(w http.ResponseWriter, r *http.Request, s State, serv
 	start := time.Now()
 	result := map[string]any{"ok": true}
 	if service == "asr" {
-		text, err := a.platform.captureAndTranscribe(ctx, s, a.probeCapture, temporary, &voiceResult{})
+		text, err := a.platform.captureAndTranscribe(ctx, s, a.probeCapture, temporary, &voiceResult{}, true)
 		if err != nil {
 			bad(w, err)
 			return
 		}
 		result["text"] = text
-	} else if err := a.platform.playSpeechWithKey(ctx, v, s, testSpokenText, temporary); err != nil {
+	} else if err := a.platform.playSpeechWithKey(ctx, v, s, testSpokenText, temporary, true); err != nil {
 		bad(w, err)
 		return
 	}

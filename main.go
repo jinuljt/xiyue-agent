@@ -59,10 +59,13 @@ func (a *api) routes() http.Handler {
 	a.voiceRoutes(m)
 	a.adminRoutes(m)
 	a.externalTaskRoutes(m)
+	a.activityRoutes(m)
 	m.HandleFunc("GET /api/state", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, a.platform.publicState()) })
 	m.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
+		s := a.platform.publicState()
+		s.Usage = a.platform.activity.recent()
 		writeJSON(w, 200, map[string]any{"name": "喜悦", "version": "0.2.0", "status": "running",
-			"services": a.serviceStatus(a.platform.publicState())})
+			"services": a.serviceStatus(s)})
 	})
 	m.HandleFunc("GET /api/tools", func(w http.ResponseWriter, r *http.Request) {
 		// The same manifests drive console forms and an eventual model tool adapter.
@@ -506,6 +509,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	defer func() { _ = p.activity.flush() }()
 	if voice != nil {
 		p.queueSpeech = true
 		if err := p.recoverDeliveries(); err != nil {
@@ -578,10 +582,16 @@ func main() {
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
+		activityFlush := time.NewTicker(30 * time.Second)
+		defer activityFlush.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-activityFlush.C:
+				if err := p.activity.flush(); err != nil {
+					log.Print("用量和对话记录暂未保存")
+				}
 			case now := <-ticker.C:
 				if e := p.tick(now.UTC()); e != nil {
 					log.Printf("任务调度未保存: %v", e)

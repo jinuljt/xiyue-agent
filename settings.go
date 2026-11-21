@@ -284,17 +284,27 @@ func (p *Platform) saveSettings(in SettingsInput) error {
 }
 
 type UsageRecord struct {
-	ConfigRevision int       `json:"config_revision"`
-	ID             string    `json:"id"`
-	Service        string    `json:"service"`
-	Provider       string    `json:"provider"`
-	Model          string    `json:"model"`
-	At             time.Time `json:"at"`
-	Success        bool      `json:"success"`
-	DurationMS     int64     `json:"duration_ms"`
-	InputTokens    *int64    `json:"input_tokens,omitempty"`
-	OutputTokens   *int64    `json:"output_tokens,omitempty"`
-	ErrorCode      string    `json:"error_code,omitempty"`
+	ConfigRevision    int        `json:"config_revision"`
+	ID                string     `json:"id"`
+	Service           string     `json:"service"`
+	Provider          string     `json:"provider"`
+	Model             string     `json:"model"`
+	At                time.Time  `json:"at"`
+	Success           bool       `json:"success"`
+	DurationMS        int64      `json:"duration_ms"`
+	InputTokens       *int64     `json:"input_tokens,omitempty"`
+	OutputTokens      *int64     `json:"output_tokens,omitempty"`
+	ErrorCode         string     `json:"error_code,omitempty"`
+	Day               string     `json:"day,omitempty"`
+	AudioMS           *int64     `json:"audio_ms,omitempty"`
+	Characters        *int64     `json:"characters,omitempty"`
+	CachedInputTokens *int64     `json:"cached_input_tokens,omitempty"`
+	CacheWriteTokens  *int64     `json:"cache_write_tokens,omitempty"`
+	Test              bool       `json:"test,omitempty"`
+	Estimated         *float64   `json:"estimated,omitempty"`
+	Currency          string     `json:"currency,omitempty"`
+	PriceAt           *time.Time `json:"price_at,omitempty"`
+	PriceSource       string     `json:"price_source,omitempty"`
 }
 
 // No provider requests are made automatically: preview is an explicit user action.
@@ -381,7 +391,7 @@ func (p *Platform) requestReply(ctx context.Context, s State, message string, op
 	} else if secret != "" {
 		req.Header.Set("Authorization", "Bearer "+secret)
 	}
-	usage := UsageRecord{ConfigRevision: s.Settings.Revision, ID: newID(), Service: service, Provider: config.Provider, Model: config.Model, At: time.Now().UTC()}
+	usage := UsageRecord{ConfigRevision: s.Settings.Revision, ID: newID(), Service: service, Provider: config.Provider, Model: config.Model, At: time.Now().UTC(), Test: options.markTextSetup}
 	start := time.Now()
 	client := &http.Client{Timeout: 45 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, requestErr := client.Do(req)
@@ -413,6 +423,12 @@ func (p *Platform) requestReply(ctx context.Context, s State, message string, op
 						Output       *int64 `json:"completion_tokens"`
 						NativeInput  *int64 `json:"input_tokens"`
 						NativeOutput *int64 `json:"output_tokens"`
+						Cached       *int64 `json:"prompt_cache_hit_tokens"`
+						CacheRead    *int64 `json:"cache_read_input_tokens"`
+						CacheWrite   *int64 `json:"cache_creation_input_tokens"`
+						Details      struct {
+							Cached *int64 `json:"cached_tokens"`
+						} `json:"prompt_tokens_details"`
 					} `json:"usage"`
 				}
 				if e = json.Unmarshal(data, &result); e != nil {
@@ -432,8 +448,23 @@ func (p *Platform) requestReply(ctx context.Context, s State, message string, op
 					if result.Usage != nil {
 						usage.InputTokens = result.Usage.Input
 						usage.OutputTokens = result.Usage.Output
+						usage.CachedInputTokens = result.Usage.Cached
+						if usage.CachedInputTokens == nil {
+							usage.CachedInputTokens = result.Usage.Details.Cached
+						}
 						if anthropic {
 							usage.InputTokens, usage.OutputTokens = result.Usage.NativeInput, result.Usage.NativeOutput
+							usage.CachedInputTokens, usage.CacheWriteTokens = result.Usage.CacheRead, result.Usage.CacheWrite
+							if usage.InputTokens != nil {
+								total := *usage.InputTokens
+								if usage.CachedInputTokens != nil {
+									total += *usage.CachedInputTokens
+								}
+								if usage.CacheWriteTokens != nil {
+									total += *usage.CacheWriteTokens
+								}
+								usage.InputTokens = &total
+							}
 						}
 					}
 					if strings.TrimSpace(reply) == "" {
@@ -445,10 +476,10 @@ func (p *Platform) requestReply(ctx context.Context, s State, message string, op
 	}
 	usage.DurationMS = time.Since(start).Milliseconds()
 	usage.Success = usage.ErrorCode == ""
-	if !options.draft {
+	p.activity.add(usage, s.Settings.Timezone)
+	if !options.draft && options.markTextSetup && usage.Success {
 		if err = p.change(func(s *State) error {
-			s.Usage = append(s.Usage, usage)
-			if options.markTextSetup && usage.Success && s.Settings.Revision == usage.ConfigRevision {
+			if s.Settings.Revision == usage.ConfigRevision {
 				s.Settings.SetupComplete = true
 			}
 			return nil
@@ -615,6 +646,7 @@ func (a *api) settingsRoutes(m *http.ServeMux) {
 	})
 	m.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		s := a.platform.publicState()
+		s.Usage = a.platform.activity.recent()
 		var mem runtime.MemStats
 		runtime.ReadMemStats(&mem)
 		writeJSON(w, 200, map[string]any{
@@ -623,7 +655,7 @@ func (a *api) settingsRoutes(m *http.ServeMux) {
 			"platform": runtime.GOOS + "/" + runtime.GOARCH, "config_revision": s.Settings.Revision,
 			"device": map[string]string{"model": a.deviceModel, "firmware": a.deviceFirmware,
 				"name": map[string]string{"OH2P": "Xiaomi 智能音箱 Pro"}[strings.ToUpper(a.deviceModel)]},
-			"services": a.serviceStatus(s), "usage": s.Usage, "voice": a.voice.status(),
+			"services": a.serviceStatus(s), "voice": a.voice.status(),
 		})
 	})
 }

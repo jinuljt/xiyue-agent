@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 )
@@ -116,7 +117,7 @@ func asrReady(asr ServiceConfig) bool {
 		(asr.Provider == "doubao" && asr.Endpoint == "" && asr.KeyConfigured)
 }
 
-func (p *Platform) captureAndTranscribe(ctx context.Context, s State, capture voiceCapture, temporary *string, result *voiceResult) (string, error) {
+func (p *Platform) captureAndTranscribe(ctx context.Context, s State, capture voiceCapture, temporary *string, result *voiceResult, test bool) (string, error) {
 	cfg := s.Settings.ASR
 	key, err := p.serviceKey(s, "asr", temporary)
 	if err != nil {
@@ -125,11 +126,21 @@ func (p *Platform) captureAndTranscribe(ctx context.Context, s State, capture vo
 	start := time.Now()
 	if cfg.Provider == "doubao" {
 		var captureTime time.Duration
+		var sent atomic.Int64
 		text, err := transcribeDoubao(ctx, cfg, key, func(ctx context.Context, emit func([]byte) error) error {
 			_, err := capture(ctx, emit)
 			captureTime = time.Since(start)
 			return err
-		})
+		}, func(bytes int) { sent.Add(int64(bytes)) })
+		u := UsageRecord{ID: newID(), Service: "asr", Provider: cfg.Provider, Model: doubaoASRResource, At: start.UTC(),
+			ConfigRevision: s.Settings.Revision, DurationMS: time.Since(start).Milliseconds(), Success: err == nil, Test: test}
+		if ms := sent.Load() / 32; ms > 0 {
+			u.AudioMS = &ms
+		}
+		if err != nil {
+			u.ErrorCode = "recognition_failed"
+		}
+		p.activity.add(u, s.Settings.Timezone)
 		result.CaptureMS = captureTime.Milliseconds()
 		result.Stage = "asr"
 		result.ASRMS = (time.Since(start) - captureTime).Milliseconds()
@@ -294,6 +305,7 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 	ctx, cancel := context.WithTimeout(parent, 50*time.Second)
 	v.active, v.cancel = true, cancel
 	v.mu.Unlock()
+	var transcript, response string
 	defer func() {
 		if ctx.Err() != nil {
 			result.Stage = "cancelled"
@@ -302,6 +314,9 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 			}
 		}
 		cancel()
+		if result.Stage != "confirmed_on_device" && (transcript != "" || result.Stage == "asr" || result.Stage == "capture") {
+			p.activity.dialogue(transcript, response, result)
+		}
 		v.mu.Lock()
 		defer v.mu.Unlock()
 		v.active = false
@@ -321,23 +336,24 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 			defer captureLED(false)
 		}
 		return capture(ctx, emit)
-	}, nil, &result)
+	}, nil, &result, false)
 	if err != nil {
 		return result, err
 	}
-	if v.confirmLogin != nil && v.confirmLogin(text) {
+	command := text
+	if suffix, found := strings.CutPrefix(text, s.Settings.WakeWord); found {
+		command = strings.TrimLeft(suffix, "，,。！!：: ")
+	}
+	if v.confirmLogin != nil && v.confirmLogin(command) {
 		result.Stage = "confirmed_on_device"
 		return result, nil
 	}
+	transcript = text
 	if !ttsReady(v, s) {
 		result.Stage = "configuration"
 		return result, errors.New("请配置系统语音或可用的豆包语音合成服务")
 	}
 	result.Stage = "local_task"
-	command := text
-	if suffix, found := strings.CutPrefix(text, s.Settings.WakeWord); found {
-		command = strings.TrimLeft(suffix, "，,。！!：: ")
-	}
 	reply, handled, err := p.voiceTask(command, time.Now().UTC())
 	if err != nil {
 		return result, err
@@ -353,6 +369,7 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 		}
 	}
 	result.Stage = "playback"
+	response = reply
 	start := time.Now()
 	err = p.playConfiguredSpeech(ctx, v, s, reply)
 	result.PlaybackMS = time.Since(start).Milliseconds()

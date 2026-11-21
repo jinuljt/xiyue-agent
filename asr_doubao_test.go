@@ -95,6 +95,7 @@ func TestDoubaoStreamsBeforeCaptureEnds(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	sentBytes := 0
 	reply, err := recognizeDoubao(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), doubaoASRResource, "synthetic-key", func(ctx context.Context, emit func([]byte) error) error {
 		if err := emit(pcm); err != nil {
 			return err
@@ -105,8 +106,8 @@ func TestDoubaoStreamsBeforeCaptureEnds(t *testing.T) {
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-	})
-	if err != nil || reply != "合成的识别结果" {
+	}, func(n int) { sentBytes += n })
+	if err != nil || reply != "合成的识别结果" || sentBytes != len(pcm) {
 		t.Fatalf("unexpected result: %q, %v", reply, err)
 	}
 }
@@ -126,7 +127,7 @@ func TestDoubaoRejectsBadFramesAndRedirects(t *testing.T) {
 		http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
 	}))
 	defer server.Close()
-	if _, err := recognizeDoubao(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), doubaoASRResource, "synthetic-key", func(context.Context, func([]byte) error) error { return nil }); err == nil ||
+	if _, err := recognizeDoubao(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), doubaoASRResource, "synthetic-key", func(context.Context, func([]byte) error) error { return nil }, nil); err == nil ||
 		strings.Contains(err.Error(), "synthetic-key") {
 		t.Fatal("redirect should fail without revealing the credential")
 	}
@@ -142,7 +143,7 @@ func TestDoubaoHandshakeReportsPermissionWithoutEchoingCredentials(t *testing.T)
 	_, err := recognizeDoubao(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), doubaoASRResource, "synthetic-key", func(ctx context.Context, _ func([]byte) error) error {
 		<-ctx.Done()
 		return ctx.Err()
-	})
+	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "未获所选识别资源") || !strings.Contains(err.Error(), "example-log-id") ||
 		strings.Contains(err.Error(), "synthetic-key") {
 		t.Fatalf("unexpected handshake error: %v", err)

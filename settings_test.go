@@ -106,7 +106,8 @@ func TestTextPreviewRecordsRealUsageWithoutConversation(t *testing.T) {
 		t.Fatal("preview failed", err)
 	}
 	s := p.snapshot()
-	if len(s.Usage) != 1 || !s.Usage[0].Success || s.Usage[0].InputTokens == nil || *s.Usage[0].InputTokens != 7 || s.Usage[0].ConfigRevision != s.Settings.Revision {
+	usage := p.activity.recent()
+	if len(usage) != 1 || !usage[0].Success || usage[0].InputTokens == nil || *usage[0].InputTokens != 7 || usage[0].ConfigRevision != s.Settings.Revision {
 		t.Fatal("usage not recorded")
 	}
 	data, _ := os.ReadFile(p.path)
@@ -131,7 +132,7 @@ func TestProviderErrorsAndRedirectsDoNotLeakSecrets(t *testing.T) {
 	if err == nil || leaked || strings.Contains(err.Error(), in.LLM.APIKey) {
 		t.Fatal("redirect or error leaked credentials")
 	}
-	if p.snapshot().Usage[0].Success {
+	if usage := p.activity.recent(); len(usage) != 1 || usage[0].Success {
 		t.Fatal("redirect must not count as successful model call")
 	}
 }
@@ -208,12 +209,15 @@ func TestAnthropicPreviewCompletesFirstSetup(t *testing.T) {
 	if err := p.saveSettings(input); err != nil {
 		t.Fatal(err)
 	}
+	if err := p.activity.flush(); err != nil {
+		t.Fatal(err)
+	}
 	reopened, err := openPlatform(p.path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	state := reopened.snapshot()
-	if !state.Settings.SetupComplete || len(state.Usage) != 1 || state.Usage[0].InputTokens == nil || *state.Usage[0].InputTokens != 10 {
+	if usage := reopened.activity.recent(); !state.Settings.SetupComplete || len(usage) != 1 || usage[0].InputTokens == nil || *usage[0].InputTokens != 10 {
 		t.Fatal("setup completion and token usage must survive edits and reload")
 	}
 }
@@ -259,7 +263,7 @@ func TestHybridRoutesOnlyTheExplicitRequest(t *testing.T) {
 	if _, err := p.chat(context.Background(), "交给外部助手。"); err == nil {
 		t.Fatal("empty delegated task should be rejected")
 	}
-	if len(p.snapshot().Usage) != 2 {
+	if len(p.activity.recent()) != 2 {
 		t.Fatal("each nonempty request should use exactly one service")
 	}
 }

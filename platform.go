@@ -90,6 +90,7 @@ type Platform struct {
 	state       State
 	queueSpeech bool
 	wakeWords   map[string]bool
+	activity    *activityStore
 }
 
 var identifier = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,47}$`)
@@ -143,7 +144,7 @@ func validateManifest(m Manifest) error {
 }
 
 func openPlatform(path string) (*Platform, error) {
-	p := &Platform{path: path}
+	p := &Platform{path: path, activity: openActivity(path + ".activity")}
 	data, err := os.ReadFile(path)
 	if err == nil {
 		if err = json.Unmarshal(data, &p.state); err != nil {
@@ -160,6 +161,10 @@ func openPlatform(path string) (*Platform, error) {
 				p.state.Settings.SetupComplete = true
 				break
 			}
+		}
+		p.activity.importLegacy(p.state.Usage, p.state.Settings.Timezone)
+		if p.activity.data.Imported && !p.activity.dirty {
+			p.state.Usage = nil
 		}
 		return p, nil
 	}

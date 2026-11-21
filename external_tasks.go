@@ -137,11 +137,17 @@ func (a *api) externalTaskRoutes(m *http.ServeMux) {
 			bad(w, err)
 			return
 		}
+		start := time.Now()
 		result, err := a.platform.callExternalTask(r.Context(), s, http.MethodPost, endpoint, in.RequestID, in.Message)
+		usage := UsageRecord{ID: newID(), Service: "external", Provider: s.Settings.External.Provider, Model: s.Settings.External.Model,
+			ConfigRevision: s.Settings.Revision, At: start.UTC(), DurationMS: time.Since(start).Milliseconds(), Success: err == nil}
 		if err != nil {
+			usage.ErrorCode = "submission_failed"
+			a.platform.activity.add(usage, s.Settings.Timezone)
 			bad(w, err)
 			return
 		}
+		added := false
 		err = a.platform.change(func(next *State) error {
 			for _, ref := range next.ExternalTasks {
 				if ref.ID == result.ID && ref.Binding == binding {
@@ -149,6 +155,7 @@ func (a *api) externalTaskRoutes(m *http.ServeMux) {
 				}
 			}
 			next.ExternalTasks = append(next.ExternalTasks, externalTaskRef{ID: result.ID, Binding: binding, CreatedAt: time.Now().UTC()})
+			added = true
 			if len(next.ExternalTasks) > 32 {
 				next.ExternalTasks = next.ExternalTasks[len(next.ExternalTasks)-32:]
 			}
@@ -157,6 +164,9 @@ func (a *api) externalTaskRoutes(m *http.ServeMux) {
 		if err != nil {
 			bad(w, errors.New("外部任务已提交，但记录未保存，可重试同一请求"))
 			return
+		}
+		if added {
+			a.platform.activity.add(usage, s.Settings.Timezone)
 		}
 		writeJSON(w, 202, result)
 	})

@@ -27,11 +27,11 @@ const (
 
 type doubaoAudioSource func(context.Context, func([]byte) error) error
 
-func transcribeDoubao(ctx context.Context, cfg ServiceConfig, key string, source doubaoAudioSource) (string, error) {
+func transcribeDoubao(ctx context.Context, cfg ServiceConfig, key string, source doubaoAudioSource, sentBytes func(int)) (string, error) {
 	if cfg.Endpoint != "" || key == "" {
 		return "", errors.New("请填写豆包语音 API Key 和资源 ID")
 	}
-	return recognizeDoubao(ctx, doubaoASREndpoint, doubaoASRResource, key, source)
+	return recognizeDoubao(ctx, doubaoASREndpoint, doubaoASRResource, key, source, sentBytes)
 }
 
 func doubaoHeaders(key, resource string) (http.Header, error) {
@@ -48,7 +48,7 @@ func doubaoHeaders(key, resource string) (http.Header, error) {
 	return headers, nil
 }
 
-func recognizeDoubao(parent context.Context, endpoint, resource, key string, source doubaoAudioSource) (string, error) {
+func recognizeDoubao(parent context.Context, endpoint, resource, key string, source doubaoAudioSource, sentBytes func(int)) (string, error) {
 	ctx, cancel := context.WithTimeout(parent, 25*time.Second)
 	defer cancel()
 	headers, err := doubaoHeaders(key, resource)
@@ -103,6 +103,9 @@ func recognizeDoubao(parent context.Context, endpoint, resource, key string, sou
 		write := func(kind byte, audio []byte) error {
 			if err := conn.Write(ctx, websocket.MessageBinary, encoder.frame(kind, 0, audio)); err != nil {
 				return errors.New("无法发送豆包语音数据或请求已超时")
+			}
+			if sentBytes != nil {
+				sentBytes(len(audio))
 			}
 			return nil
 		}

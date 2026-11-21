@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
+	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -36,10 +38,10 @@ func ttsReady(v *voiceRuntime, s State) bool {
 }
 
 func (p *Platform) playConfiguredSpeech(ctx context.Context, v *voiceRuntime, s State, text string) error {
-	return p.playSpeechWithKey(ctx, v, s, text, nil)
+	return p.playSpeechWithKey(ctx, v, s, text, nil, false)
 }
 
-func (p *Platform) playSpeechWithKey(ctx context.Context, v *voiceRuntime, s State, text string, temporary *string) error {
+func (p *Platform) playSpeechWithKey(ctx context.Context, v *voiceRuntime, s State, text string, temporary *string, test bool) error {
 	if !ttsReady(v, s) {
 		return errors.New("请配置系统语音或可用的豆包语音合成服务")
 	}
@@ -50,7 +52,18 @@ func (p *Platform) playSpeechWithKey(ctx context.Context, v *voiceRuntime, s Sta
 	if err != nil {
 		return err
 	}
-	return doubaoSpeech(ctx, doubaoTTSEndpoint, s.Settings.TTS.Model, key, text, v.playPCM)
+	start := time.Now()
+	err = doubaoSpeech(ctx, doubaoTTSEndpoint, s.Settings.TTS.Model, key, text, v.playPCM)
+	if size := len(strings.TrimSpace(text)); size > 0 && size <= 4096 {
+		count := int64(utf8.RuneCountInString(strings.TrimSpace(text)))
+		u := UsageRecord{ID: newID(), Service: "tts", Provider: s.Settings.TTS.Provider, Model: s.Settings.TTS.Model, At: start.UTC(),
+			ConfigRevision: s.Settings.Revision, DurationMS: time.Since(start).Milliseconds(), Success: err == nil, Test: test, Characters: &count}
+		if err != nil {
+			u.ErrorCode = "synthesis_failed"
+		}
+		p.activity.add(u, s.Settings.Timezone)
+	}
+	return err
 }
 
 func doubaoSpeech(ctx context.Context, endpoint, speaker, key, text string, play pcmPlayer) error {

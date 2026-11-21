@@ -100,7 +100,7 @@ func TestDeviceWakeRoutesCountdownLocally(t *testing.T) {
 		t.Fatal("wake event did not complete a voice turn")
 	}
 	state := p.snapshot()
-	if len(state.Usage) != 0 || len(state.Schedules) != 1 || state.Schedules[0].AbilityID != quickTimer.ID {
+	if len(p.activity.recent()) != 0 || len(state.Schedules) != 1 || state.Schedules[0].AbilityID != quickTimer.ID {
 		t.Fatal("countdown must schedule locally without a model call")
 	}
 }
