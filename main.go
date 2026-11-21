@@ -370,6 +370,8 @@ func main() {
 	abilityDir := flag.String("abilities", "../xiyue-abilities/capabilities", "可选的声明式能力目录")
 	systemVoice := flag.Bool("system-voice", false, "启用本机原生播报和 WAV 语音入口")
 	wakeSocket := flag.String("oh2p-wake-socket", "", "OH2P 本地唤醒事件套接字")
+	wakeDetector := flag.String("oh2p-wake-detector", "", "OH2P 本地唤醒检测器程序")
+	wakeKeywords := flag.String("oh2p-wake-keywords", "", "OH2P 本地唤醒词文件")
 	notifyWake := flag.String("notify-wake", "", "向正在运行的 OH2P Agent 通知唤醒词后退出")
 	cancelVoice := flag.Bool("cancel-voice", false, "向正在运行的 OH2P Agent 请求取消当前语音")
 	vad := flag.Float64("oh2p-vad-threshold", 1100000, "OH2P 录音 S32 RMS 声音阈值")
@@ -385,6 +387,10 @@ func main() {
 	deviceFirmware := flag.String("device-firmware", "", "安装时核对的设备固件版本")
 	outputDevice := flag.String("audio-playback-device", "", "豆包语音使用的 ALSA 输出设备")
 	flag.Parse()
+	if (*wakeDetector != "" || *wakeKeywords != "") &&
+		(*wakeSocket == "" || !filepath.IsAbs(*wakeDetector) || !filepath.IsAbs(*wakeKeywords)) {
+		log.Fatal("本机唤醒检测器需要程序、关键词文件和套接字路径")
+	}
 	if *provisionAdmin {
 		if err := sendOwnerSetup(*installSocket, os.Stdin); err != nil {
 			log.Fatal(err)
@@ -556,9 +562,18 @@ func main() {
 			voice.confirmLogin = admin.confirmVoiceLogin
 			captureLED = admin.captureLED
 		}
-		go p.serveWakeSocket(ctx, wakes, voice, func(ctx context.Context, emit func([]byte) error) ([]byte, error) {
+		capture := func(ctx context.Context, emit func([]byte) error) ([]byte, error) {
 			return captureOH2P(ctx, arecord, *vad, emit)
-		}, captureLED)
+		}
+		go p.serveWakeSocket(ctx, wakes, voice, capture, captureLED)
+		if *wakeDetector != "" {
+			labels, err := wakeKeywordLabels(*wakeKeywords)
+			if err != nil || !labels[p.snapshot().Settings.WakeWord] {
+				log.Fatal("本机唤醒词文件缺少当前配置的唤醒词")
+			}
+			p.wakeWords = labels
+			go p.serveWakeDetector(ctx, *wakeDetector, *wakeKeywords, voice, capture, captureLED)
+		}
 	}
 	go func() {
 		ticker := time.NewTicker(time.Second)

@@ -227,6 +227,9 @@ func (p *Platform) saveSettings(in SettingsInput) error {
 	if strings.TrimSpace(in.Name) == "" || len(in.Name) > 120 || strings.TrimSpace(in.WakeWord) == "" || len(in.WakeWord) > 48 {
 		return errors.New("请填写有效的设备名称与唤醒词")
 	}
+	if p.wakeWords != nil && !p.wakeWords[strings.TrimSpace(in.WakeWord)] {
+		return errors.New("本机还没有这个唤醒词的识别配置，请保留当前唤醒词")
+	}
 	if _, err := time.LoadLocation(in.Timezone); err != nil {
 		return errors.New("时区无效")
 	}

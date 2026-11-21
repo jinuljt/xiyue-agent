@@ -10,7 +10,7 @@ import (
 )
 
 var remindAfter = regexp.MustCompile("^(?:请)?([0-9一二两三四五六七八九十]{1,4})\\s*(秒钟?|分钟|分|小时)后[，,\\s]*提醒我\\s*(.+)$")
-var timerFor = regexp.MustCompile("^(?:请)?(?:帮我)?计时\\s*([0-9一二两三四五六七八九十]{1,4})\\s*(秒钟?|分钟|分|小时)$")
+var timerFor = regexp.MustCompile("^(?:请)?(?:帮我)?(?:(?:设置?|开始)(?:一个|个)?)?(?:倒)?计时[：:，,\\s]*([0-9一二两三四五六七八九十]{1,4})\\s*(秒钟?|分钟|分|小时)$")
 
 func voiceNumber(text string) int {
 	if n, err := strconv.Atoi(text); err == nil {

@@ -32,6 +32,7 @@ type voiceRuntime struct {
 	active       bool
 	cancel       context.CancelFunc
 	last         *voiceResult
+	wakeReady    bool
 }
 
 type voiceCapture func(context.Context, func([]byte) error) ([]byte, error)
@@ -52,7 +53,13 @@ func (v *voiceRuntime) status() any {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return map[string]any{"available": true, "cloud_tts_available": v.playPCM != nil, "busy": v.active, "last_turn": v.last}
+	return map[string]any{"available": true, "cloud_tts_available": v.playPCM != nil, "busy": v.active, "last_turn": v.last, "wake_detector_ready": v.wakeReady}
+}
+
+func (v *voiceRuntime) setWakeReady(ready bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.wakeReady = ready
 }
 
 // Accept only finished clips from the device's 16 kHz mono PCM capture boundary.
@@ -327,7 +334,11 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 		return result, errors.New("请配置系统语音或可用的豆包语音合成服务")
 	}
 	result.Stage = "local_task"
-	reply, handled, err := p.voiceTask(text, time.Now().UTC())
+	command := text
+	if suffix, found := strings.CutPrefix(text, s.Settings.WakeWord); found {
+		command = strings.TrimLeft(suffix, "，,。！!：: ")
+	}
+	reply, handled, err := p.voiceTask(command, time.Now().UTC())
 	if err != nil {
 		return result, err
 	}

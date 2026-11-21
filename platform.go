@@ -89,6 +89,7 @@ type Platform struct {
 	path        string
 	state       State
 	queueSpeech bool
+	wakeWords   map[string]bool
 }
 
 var identifier = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,47}$`)

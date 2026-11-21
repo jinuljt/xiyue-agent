@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"log"
 	"math"
 	"net"
 	"os"
@@ -179,24 +180,92 @@ func (p *Platform) serveWakeSocket(ctx context.Context, listener net.Listener, v
 			case "cancel":
 				v.stopTurn()
 			case "wake " + p.snapshot().Settings.WakeWord:
-				// runVoiceTurn discards competing wake events while any turn owns the microphone.
-				go func() {
-					result, err := p.runVoiceTurn(ctx, v, capture, setLED)
-					if err != nil || result.Stage != "completed" || !result.modelUsed {
-						return
-					}
-					_ = p.change(func(s *State) error {
-						if s.Settings.Revision != result.Revision || s.Settings.DeviceSetupComplete {
-							return errNoVoiceChange
-						}
-						s.Settings.DeviceSetupComplete = true
-						return nil
-					})
-				}()
+				go p.runDeviceWake(ctx, v, capture, setLED)
 			}
 		}
 		_ = conn.Close()
 	}
+}
+
+func (p *Platform) runDeviceWake(ctx context.Context, v *voiceRuntime, capture voiceCapture, setLED func(bool)) {
+	result, err := p.runVoiceTurn(ctx, v, capture, setLED)
+	if err != nil || result.Stage != "completed" || !result.modelUsed {
+		return
+	}
+	_ = p.change(func(s *State) error {
+		if s.Settings.Revision != result.Revision || s.Settings.DeviceSetupComplete {
+			return errNoVoiceChange
+		}
+		s.Settings.DeviceSetupComplete = true
+		return nil
+	})
+}
+
+func (p *Platform) serveWakeDetector(ctx context.Context, binary, keywords string, v *voiceRuntime, capture voiceCapture, setLED func(bool)) {
+	for ctx.Err() == nil {
+		p.runWakeDetector(ctx, binary, keywords, v, capture, setLED)
+		if ctx.Err() != nil {
+			return
+		}
+		log.Print("本机唤醒检测器已退出，正在重试")
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func (p *Platform) runWakeDetector(parent context.Context, binary, keywords string, v *voiceRuntime, capture voiceCapture, setLED func(bool)) {
+	ctx, stop := context.WithCancel(parent)
+	defer stop()
+	cmd := exec.CommandContext(ctx, binary, "--kws-only", "--keywords-file", keywords)
+	cmd.Dir = filepath.Dir(binary)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return
+	}
+	cmd.Stderr = cmd.Stdout
+	if err := cmd.Start(); err != nil {
+		_ = out.Close()
+		return
+	}
+	defer v.setWakeReady(false)
+	events := bufio.NewScanner(out)
+	for events.Scan() {
+		line := events.Text()
+		if strings.Contains(line, "app components started") {
+			v.setWakeReady(true)
+			log.Print("喜悦 Agent 本机唤醒检测器已就绪")
+		}
+		if word, ok := detectedWakeWord(line); ok && word == p.snapshot().Settings.WakeWord {
+			go p.runDeviceWake(parent, v, capture, setLED)
+		}
+	}
+	stop()
+	_ = cmd.Wait()
+}
+
+func detectedWakeWord(line string) (string, bool) {
+	_, word, found := strings.Cut(line, "gate armed: local_kws: ")
+	return strings.TrimSpace(word), found
+}
+
+func wakeKeywordLabels(path string) (map[string]bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	labels := map[string]bool{}
+	scanner := bufio.NewScanner(io.LimitReader(file, 16<<10))
+	for scanner.Scan() {
+		_, label, found := strings.Cut(scanner.Text(), "@")
+		if label = strings.TrimSpace(label); found && label != "" {
+			labels[label] = true
+		}
+	}
+	return labels, scanner.Err()
 }
 
 func sendWakePacket(path, packet string) error {
