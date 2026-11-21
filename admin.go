@@ -21,6 +21,7 @@ type ownerState struct {
 	Username      string    `json:"username,omitempty"`
 	PasswordSalt  []byte    `json:"password_salt,omitempty"`
 	PasswordHash  []byte    `json:"password_hash,omitempty"`
+	LoginHash     []byte    `json:"login_hash_120000,omitempty"`
 	SessionDigest string    `json:"session_digest"`
 	ExpiresAt     time.Time `json:"expires_at"`
 }
@@ -44,6 +45,37 @@ func digest(value string) string {
 
 func passwordHash(password string, salt []byte) ([]byte, error) {
 	return pbkdf2.Key(sha256.New, password, salt, 600_000, 32)
+}
+
+func fastLoginHash(password string, salt []byte) ([]byte, error) {
+	return pbkdf2.Key(sha256.New, password, salt, 120_000, 32)
+}
+
+func (o *ownerState) checkPassword(password string) bool {
+	if len(o.LoginHash) == 32 {
+		hash, err := fastLoginHash(password, o.PasswordSalt)
+		return err == nil && subtle.ConstantTimeCompare(hash, o.LoginHash) == 1
+	}
+	hash, err := passwordHash(password, o.PasswordSalt)
+	return err == nil && subtle.ConstantTimeCompare(hash, o.PasswordHash) == 1
+}
+
+func (o *ownerState) setPassword(password string) error {
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return err
+	}
+	// Keep the legacy hash so a verified software rollback can still log in.
+	legacy, err := passwordHash(password, salt)
+	if err != nil {
+		return err
+	}
+	fast, err := fastLoginHash(password, salt)
+	if err != nil {
+		return err
+	}
+	o.PasswordSalt, o.PasswordHash, o.LoginHash = salt, legacy, fast
+	return nil
 }
 
 func (p *Platform) authenticated(r *http.Request) bool {
@@ -105,10 +137,17 @@ func (a *api) authenticateOwner(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 409, map[string]string{"error": "请在安装向导中设置管理员"})
 		return
 	}
-	candidate, err := passwordHash(request.Password, current.PasswordSalt)
-	if err != nil || subtle.ConstantTimeCompare(candidate, current.PasswordHash) != 1 || request.Username != current.Username {
+	if !current.checkPassword(request.Password) || request.Username != current.Username {
 		writeJSON(w, 401, map[string]string{"error": "用户名或密码不正确"})
 		return
+	}
+	if len(current.LoginHash) != 32 {
+		fast, err := fastLoginHash(request.Password, current.PasswordSalt)
+		if err != nil {
+			http.Error(w, "无法更新密码校验", 500)
+			return
+		}
+		current.LoginHash = fast
 	}
 	if err := a.issueOwnerSession(w, *current, ""); err != nil {
 		bad(w, err)
@@ -167,13 +206,7 @@ func (a *api) changeOwnerPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	previous := owner.SessionDigest
-	owner.PasswordSalt = make([]byte, 16)
-	if _, err := rand.Read(owner.PasswordSalt); err != nil {
-		http.Error(w, "无法修改密码", 500)
-		return
-	}
-	owner.PasswordHash, err = passwordHash(in.Password, owner.PasswordSalt)
-	if err != nil {
+	if err := owner.setPassword(in.Password); err != nil {
 		http.Error(w, "无法修改密码", 500)
 		return
 	}

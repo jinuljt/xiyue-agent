@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -23,23 +21,15 @@ func (p *Platform) provisionOwner(r ownerRequest) error {
 	}
 	return p.change(func(s *State) error {
 		if current := s.Owner; current != nil && len(current.PasswordHash) == 32 {
-			if current.Username == r.Username {
-				hash, err := passwordHash(r.Password, current.PasswordSalt)
-				if err == nil && subtle.ConstantTimeCompare(hash, current.PasswordHash) == 1 {
-					return nil
-				}
+			if current.Username == r.Username && current.checkPassword(r.Password) {
+				return nil
 			}
 			return errors.New("音箱已设置管理员，请直接登录控制台")
 		}
-		owner := &ownerState{Username: r.Username, PasswordSalt: make([]byte, 16)}
-		if _, err := rand.Read(owner.PasswordSalt); err != nil {
-			return errors.New("无法生成管理员凭据")
-		}
-		hash, err := passwordHash(r.Password, owner.PasswordSalt)
-		if err != nil {
+		owner := &ownerState{Username: r.Username}
+		if err := owner.setPassword(r.Password); err != nil {
 			return errors.New("无法保存管理员凭据")
 		}
-		owner.PasswordHash = hash
 		s.Owner = owner
 		return nil
 	})

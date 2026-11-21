@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"net/http"
@@ -133,5 +134,51 @@ func TestConsoleSetupAllowedOnlyOnceOnLocalNetwork(t *testing.T) {
 	}
 	if w := submit("127.0.0.1:4921", "https://"+host); w.Code != 409 {
 		t.Fatal("setup remained open after the account was set")
+	}
+}
+
+func TestLegacyPasswordMigratesOnlyAfterSuccessfulLogin(t *testing.T) {
+	p, err := openPlatform(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	salt := make([]byte, 16)
+	legacy, err := passwordHash("fixture-owner-password", salt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.change(func(s *State) error {
+		s.Owner = &ownerState{Username: "owner", PasswordSalt: salt, PasswordHash: legacy}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const host = "speaker.test:8443"
+	g := &adminGate{host: host}
+	h := (&api{platform: p, admin: g}).routes()
+	attempt := func(password string) int {
+		req := httptest.NewRequest("POST", "https://"+host+"/api/session/login",
+			strings.NewReader(`{"username":"owner","password":"`+password+`"}`))
+		req.Header.Set("Origin", "https://"+host)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Xiyue-Request", "console")
+		recorder := httptest.NewRecorder()
+		h.ServeHTTP(recorder, req)
+		g.lastAttempt = time.Time{}
+		return recorder.Code
+	}
+	if status := attempt("incorrect"); status != 401 || len(p.snapshot().Owner.LoginHash) != 0 {
+		t.Fatal("invalid credentials triggered migration")
+	}
+	if status := attempt("fixture-owner-password"); status != 200 {
+		t.Fatalf("legacy login failed with %d", status)
+	}
+	owner := p.snapshot().Owner
+	if len(owner.LoginHash) != 32 || !bytes.Equal(owner.PasswordHash, legacy) ||
+		!owner.checkPassword("fixture-owner-password") || owner.checkPassword("incorrect") {
+		t.Fatal("stored credentials do not support fast login or software rollback")
+	}
+	if status := attempt("fixture-owner-password"); status != 200 {
+		t.Fatalf("fast login failed with %d", status)
 	}
 }
