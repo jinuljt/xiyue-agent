@@ -85,7 +85,7 @@ func providers() map[string][]Provider {
 			{ID: "custom_anthropic", Name: "自定义 · Anthropic Messages", Note: "填写兼容 Messages 的 Base URL 和模型 ID。"},
 		},
 		"asr": {
-			{ID: "doubao", Name: "豆包语音（云端）", Model: doubaoASRResource, Models: []string{doubaoASRResource, "volc.seedasr.sauc.concurrent", "volc.bigasr.sauc.duration", "volc.bigasr.sauc.concurrent"}, Note: "开通豆包流式语音识别，填写火山引擎 API Key 并选择对应资源。"},
+			{ID: "doubao", Name: "豆包语音（云端）", Model: doubaoASRResource, Models: []string{doubaoASRResource, "volc.seedasr.sauc.concurrent"}, Note: "开通豆包流式语音识别，填写火山引擎 API Key 并选择对应资源。"},
 			{ID: "sensevoice", Name: "自建 SenseVoice", Note: "填写你部署的 SenseVoice 服务地址。"},
 			{ID: "custom", Name: "其他语音识别服务", Note: "保存服务地址与接入凭证，协议适配需另行接入。"},
 		},
