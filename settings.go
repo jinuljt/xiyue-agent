@@ -85,7 +85,7 @@ func providers() map[string][]Provider {
 			{ID: "custom_anthropic", Name: "自定义 · Anthropic Messages", Note: "填写兼容 Messages 的 Base URL 和模型 ID。"},
 		},
 		"asr": {
-			{ID: "doubao", Name: "豆包语音（云端）", Model: doubaoASRResource, Models: []string{doubaoASRResource, "volc.seedasr.sauc.concurrent"}, Note: "开通豆包流式语音识别，填写火山引擎 API Key 并选择对应资源。"},
+			{ID: "doubao", Name: "豆包实时语音识别", Model: doubaoASRResource, Models: []string{doubaoASRResource}, Note: "开通豆包流式语音识别 2.0 小时版并填写火山引擎 API Key。"},
 			{ID: "sensevoice", Name: "自建 SenseVoice", Note: "填写你部署的 SenseVoice 服务地址。"},
 			{ID: "custom", Name: "其他语音识别服务", Note: "保存服务地址与接入凭证，协议适配需另行接入。"},
 		},
@@ -187,7 +187,11 @@ func normalizeServiceInput(name string, input ServiceInput) (ServiceConfig, erro
 	if err := validateEndpoint(endpoint); err != nil {
 		return ServiceConfig{}, err
 	}
-	return ServiceConfig{Provider: input.Provider, Endpoint: endpoint, Model: strings.TrimSpace(input.Model)}, nil
+	model := strings.TrimSpace(input.Model)
+	if name == "asr" && input.Provider == "doubao" {
+		model = doubaoASRResource
+	}
+	return ServiceConfig{Provider: input.Provider, Endpoint: endpoint, Model: model}, nil
 }
 
 func (p *Platform) seal(name, secret string) (string, error) {

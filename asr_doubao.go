@@ -31,11 +31,7 @@ func transcribeDoubao(ctx context.Context, cfg ServiceConfig, key string, source
 	if cfg.Endpoint != "" || key == "" {
 		return "", errors.New("请填写豆包语音 API Key 和资源 ID")
 	}
-	resource := cfg.Model
-	if resource == "" {
-		resource = doubaoASRResource
-	}
-	return recognizeDoubao(ctx, doubaoASREndpoint, resource, key, source)
+	return recognizeDoubao(ctx, doubaoASREndpoint, doubaoASRResource, key, source)
 }
 
 func doubaoHeaders(key, resource string) (http.Header, error) {
@@ -181,7 +177,7 @@ func doubaoHandshakeError(response *http.Response) error {
 		case strings.Contains(detail, "invalid api key") || response.StatusCode == http.StatusUnauthorized:
 			message += "，请确认豆包语音 API Key 仍然有效"
 		case response.StatusCode == http.StatusForbidden:
-			message += "，请核对 API Key 所属项目及已开通的识别计费版本"
+			message += "，请核对 API Key 所属项目是否已开通流式语音识别 2.0 小时版"
 		}
 	}
 	if id := response.Header.Get("X-Tt-Logid"); doubaoLogID.MatchString(id) {

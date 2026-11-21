@@ -27,6 +27,7 @@ func TestSettingsPersistAndNeverExposeCredentials(t *testing.T) {
 	in := settingsInput(p.snapshot().Settings)
 	in.Name = "测试音箱"
 	in.LLM.APIKey = "synthetic-credential-for-local-test"
+	in.ASR = ServiceInput{Provider: "doubao", Model: "volc.seedasr.sauc.concurrent", APIKey: "synthetic-asr-key"}
 	if err = p.saveSettings(in); err != nil {
 		t.Fatal(err)
 	}
@@ -47,6 +48,9 @@ func TestSettingsPersistAndNeverExposeCredentials(t *testing.T) {
 	}
 	if p.snapshot().Settings.Name != "测试音箱" || !p.snapshot().Settings.LLM.KeyConfigured {
 		t.Fatal("configuration lost after restart")
+	}
+	if asr := p.snapshot().Settings.ASR; asr.Model != doubaoASRResource || !asr.KeyConfigured {
+		t.Fatal("Doubao settings must use the hourly resource and retain the credential")
 	}
 	public, _ := json.Marshal(p.publicState())
 	if strings.Contains(string(public), "sealed") || strings.Contains(string(public), in.LLM.APIKey) {
