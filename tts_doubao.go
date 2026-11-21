@@ -31,18 +31,22 @@ func playALSA(ctx context.Context, device string, audio io.Reader) error {
 
 func ttsReady(v *voiceRuntime, s State) bool {
 	cfg := s.Settings.TTS
-	return v != nil && (cfg.Provider == "system" ||
+	return v != nil && ((cfg.Provider == "system" && v.speak != nil) ||
 		(cfg.Provider == "doubao" && v.playPCM != nil && cfg.Model != "" && cfg.Endpoint == "" && cfg.KeyConfigured))
 }
 
 func (p *Platform) playConfiguredSpeech(ctx context.Context, v *voiceRuntime, s State, text string) error {
+	return p.playSpeechWithKey(ctx, v, s, text, nil)
+}
+
+func (p *Platform) playSpeechWithKey(ctx context.Context, v *voiceRuntime, s State, text string, temporary *string) error {
 	if !ttsReady(v, s) {
 		return errors.New("请配置系统语音或可用的豆包语音合成服务")
 	}
 	if s.Settings.TTS.Provider == "system" {
 		return v.speak(ctx, text)
 	}
-	key, err := p.unseal("service:tts", s.Sealed["service:tts"])
+	key, err := p.serviceKey(s, "tts", temporary)
 	if err != nil {
 		return err
 	}

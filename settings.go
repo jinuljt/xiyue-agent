@@ -161,6 +161,17 @@ func validateServiceKey(secret string) error {
 	return nil
 }
 
+func (p *Platform) serviceKey(s State, service string, temporary *string) (string, error) {
+	if temporary != nil {
+		return *temporary, nil
+	}
+	name := "service:" + service
+	if sealed := s.Sealed[name]; sealed != "" {
+		return p.unseal(name, sealed)
+	}
+	return "", nil
+}
+
 func normalizeServiceInput(name string, input ServiceInput) (ServiceConfig, error) {
 	known := false
 	for _, option := range providers()[name] {
@@ -337,16 +348,11 @@ func (p *Platform) requestReply(ctx context.Context, s State, message string, op
 		endpoint += path
 		payload = params
 	}
-	var secret string
-	if options.transientKey != nil {
-		secret = *options.transientKey
-	} else if sealed := s.Sealed["service:"+service]; sealed != "" {
-		var err error
-		secret, err = p.unseal("service:"+service, sealed)
-		if err != nil {
-			return "", err
-		}
+	secret, err := p.serviceKey(s, service, options.transientKey)
+	if err != nil {
+		return "", err
 	}
+
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return "", errors.New("服务地址无效")
@@ -558,6 +564,10 @@ func (a *api) settingsRoutes(m *http.ServeMux) {
 		case "external":
 			s.Settings.Mode = "external"
 			selected = &s.Settings.External
+		case "asr":
+			selected = &s.Settings.ASR
+		case "tts":
+			selected = &s.Settings.TTS
 		default:
 			bad(w, errors.New("未知验证服务"))
 			return
@@ -584,6 +594,10 @@ func (a *api) settingsRoutes(m *http.ServeMux) {
 			candidate.KeyConfigured = key != "" || (options.transientKey == nil && current.KeyConfigured)
 			options.draft = candidate != current || options.transientKey != nil
 			*selected = candidate
+		}
+		if in.Service == "asr" || in.Service == "tts" {
+			a.verifySpeech(w, r, s, in.Service, options.transientKey)
+			return
 		}
 		start := time.Now()
 		if _, err := a.platform.requestReply(r.Context(), s, "这是连接验证，请只回复 OK。", options); err != nil {

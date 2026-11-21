@@ -24,14 +24,9 @@ const (
 	doubaoPacketBytes = 16_000 * 2 / 5 // 200 ms of 16 kHz, 16-bit mono audio
 )
 
-func (p *Platform) transcribeDoubao(ctx context.Context, s State, wav []byte) (string, error) {
-	cfg := s.Settings.ASR
-	if cfg.Endpoint != "" || s.Sealed["service:asr"] == "" {
-		return "", errors.New("请在控制台保存豆包语音 API Key 与资源 ID")
-	}
-	key, err := p.unseal("service:asr", s.Sealed["service:asr"])
-	if err != nil {
-		return "", err
+func transcribeDoubao(ctx context.Context, cfg ServiceConfig, key string, wav []byte) (string, error) {
+	if cfg.Endpoint != "" || key == "" {
+		return "", errors.New("请填写豆包语音 API Key 和资源 ID")
 	}
 	resource := cfg.Model
 	if resource == "" {

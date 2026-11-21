@@ -269,7 +269,8 @@ func TestServiceHealthReportsOnlyCurrentConfigurationResults(t *testing.T) {
 	}
 	config.LLM.KeyConfigured = true
 	config.ASR = ServiceConfig{Provider: "sensevoice", Endpoint: "http://localhost/v1"}
-	a.voice = &voiceRuntime{last: &voiceResult{Revision: config.Revision, Stage: "playback"}}
+	a.voice = &voiceRuntime{speak: func(context.Context, string) error { return nil },
+		last: &voiceResult{Revision: config.Revision, Stage: "playback"}}
 	state := State{Settings: config, Usage: []UsageRecord{
 		{ConfigRevision: config.Revision, Service: "llm", Success: true},
 		{ConfigRevision: config.Revision + 1, Service: "llm", Success: false},

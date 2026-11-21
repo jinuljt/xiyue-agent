@@ -28,6 +28,8 @@ type api struct {
 	platform                    *Platform
 	assets                      map[string][]byte
 	voice                       *voiceRuntime
+	speechProbe                 *voiceRuntime
+	probeCapture                func(context.Context) ([]byte, error)
 	admin                       *adminGate
 }
 
@@ -402,13 +404,14 @@ func main() {
 		}
 		return
 	}
-	var voice *voiceRuntime
-	if *systemVoice {
-		info, e := os.Stat(systemTTS)
-		if e != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
-			log.Fatal("未找到可执行的音箱系统语音服务")
+	var voice, speaker *voiceRuntime
+	var probeCapture func(context.Context) ([]byte, error)
+	oh2p := strings.EqualFold(*deviceModel, "OH2P")
+	if *systemVoice || oh2p {
+		speaker = &voiceRuntime{}
+		if info, err := os.Stat(systemTTS); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
+			speaker.speak = speakSystem
 		}
-		voice = &voiceRuntime{speak: speakSystem}
 		if _, err := exec.LookPath("aplay"); err == nil {
 			device := *outputDevice
 			if device == "" {
@@ -417,10 +420,21 @@ func main() {
 					device = "Playback"
 				}
 			}
-			voice.playPCM = func(ctx context.Context, audio io.Reader) error {
+			speaker.playPCM = func(ctx context.Context, audio io.Reader) error {
 				return playALSA(ctx, device, audio)
 			}
 		}
+		if oh2p {
+			if arecord, err := exec.LookPath("arecord"); err == nil && *vad > 0 && !math.IsInf(*vad, 0) {
+				probeCapture = func(ctx context.Context) ([]byte, error) { return captureOH2P(ctx, arecord, *vad) }
+			}
+		}
+	}
+	if *systemVoice {
+		if speaker.speak == nil {
+			log.Fatal("未找到可执行的音箱系统语音服务")
+		}
+		voice = speaker
 	}
 	host, _, err := net.SplitHostPort(*listen)
 	if err != nil {
@@ -556,7 +570,8 @@ func main() {
 			}
 		}
 	}()
-	server := &http.Server{Handler: (&api{platform: p, assets: assets, voice: voice, admin: admin, deviceModel: *deviceModel, deviceFirmware: *deviceFirmware}).routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 55 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	server := &http.Server{Handler: (&api{platform: p, assets: assets, voice: voice, speechProbe: speaker, probeCapture: probeCapture,
+		admin: admin, deviceModel: *deviceModel, deviceFirmware: *deviceFirmware}).routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 55 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -100,9 +100,17 @@ func asrReady(asr ServiceConfig) bool {
 }
 
 func (p *Platform) transcribe(ctx context.Context, s State, wav []byte) (string, error) {
+	return p.transcribeWithKey(ctx, s, wav, nil)
+}
+
+func (p *Platform) transcribeWithKey(ctx context.Context, s State, wav []byte, temporary *string) (string, error) {
 	cfg := s.Settings.ASR
+	key, err := p.serviceKey(s, "asr", temporary)
+	if err != nil {
+		return "", err
+	}
 	if cfg.Provider == "doubao" {
-		return p.transcribeDoubao(ctx, s, wav)
+		return transcribeDoubao(ctx, cfg, key, wav)
 	}
 	if cfg.Provider != "sensevoice" || cfg.Endpoint == "" {
 		return "", errors.New("请先配置 FunASR SenseVoice 服务地址")
@@ -134,14 +142,10 @@ func (p *Platform) transcribe(ctx context.Context, s State, wav []byte) (string,
 		return "", errors.New("语音识别地址无效")
 	}
 	req.Header.Set("Content-Type", form.FormDataContentType())
-	if sealed := s.Sealed["service:asr"]; sealed != "" {
+	if key != "" {
 		u, _ := url.Parse(cfg.Endpoint)
 		if u.Scheme != "https" && u.Hostname() != "localhost" && !net.ParseIP(u.Hostname()).IsLoopback() {
 			return "", errors.New("带凭证的语音识别服务须用 HTTPS")
-		}
-		key, err := p.unseal("service:asr", sealed)
-		if err != nil {
-			return "", err
 		}
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
