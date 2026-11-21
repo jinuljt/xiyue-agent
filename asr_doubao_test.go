@@ -127,7 +127,7 @@ func TestDoubaoRejectsBadFramesAndRedirects(t *testing.T) {
 		http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
 	}))
 	defer server.Close()
-	if _, err := recognizeDoubao(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), doubaoASRResource, "synthetic-key", func(context.Context, func([]byte) error) error { return nil }, nil); err == nil ||
+	if _, err := recognizeDoubao(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), doubaoASRResource, "synthetic-key", func(_ context.Context, emit func([]byte) error) error { return emit([]byte{1, 2}) }, nil); err == nil ||
 		strings.Contains(err.Error(), "synthetic-key") {
 		t.Fatal("redirect should fail without revealing the credential")
 	}
@@ -140,12 +140,27 @@ func TestDoubaoHandshakeReportsPermissionWithoutEchoingCredentials(t *testing.T)
 		_, _ = io.WriteString(w, `{"message":"resource not granted to synthetic-key"}`)
 	}))
 	defer server.Close()
-	_, err := recognizeDoubao(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), doubaoASRResource, "synthetic-key", func(ctx context.Context, _ func([]byte) error) error {
+	_, err := recognizeDoubao(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), doubaoASRResource, "synthetic-key", func(ctx context.Context, emit func([]byte) error) error {
+		if err := emit([]byte{1, 2}); err != nil {
+			return err
+		}
 		<-ctx.Done()
 		return ctx.Err()
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "未获所选识别资源") || !strings.Contains(err.Error(), "example-log-id") ||
 		strings.Contains(err.Error(), "synthetic-key") {
 		t.Fatalf("unexpected handshake error: %v", err)
+	}
+}
+
+func TestDoubaoDoesNotConnectOnSilentFollowup(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("silence must not initiate a cloud recognition request")
+	}))
+	defer server.Close()
+	_, err := recognizeDoubao(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), doubaoASRResource, "synthetic-key",
+		func(context.Context, func([]byte) error) error { return errNoSpeech }, nil)
+	if err != errNoSpeech {
+		t.Fatalf("expected silent timeout, got %v", err)
 	}
 }

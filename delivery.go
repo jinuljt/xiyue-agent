@@ -7,6 +7,7 @@ import (
 )
 
 const deliveryMaxAge = 5 * time.Minute
+const alarmDuration = time.Minute
 
 // After a crash, a previously claimed notification may already have played.
 // Mark it interrupted and let an explicit task repeat create a new delivery.
@@ -29,10 +30,13 @@ func (p *Platform) recoverDeliveries() error {
 func (p *Platform) deliverOne(parent context.Context, v *voiceRuntime, now time.Time) error {
 	p.mu.Lock()
 	pending := false
+	alarmPending := false
 	for _, event := range p.state.Events {
 		if event.Delivery == "pending" {
 			pending = true
-			break
+			if event.Alarm && now.Sub(event.At) <= deliveryMaxAge {
+				alarmPending = true
+			}
 		}
 	}
 	p.mu.Unlock()
@@ -42,16 +46,20 @@ func (p *Platform) deliverOne(parent context.Context, v *voiceRuntime, now time.
 
 	v.mu.Lock()
 	if v.active {
+		if alarmPending && v.following && v.cancel != nil {
+			v.cancel()
+		}
 		v.mu.Unlock()
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	ctx, cancel := context.WithCancel(parent)
 	v.active, v.cancel = true, cancel
 	v.mu.Unlock()
 	defer func() {
 		cancel()
 		v.mu.Lock()
 		v.active, v.cancel = false, nil
+		v.alarmCancel = nil
 		v.mu.Unlock()
 	}()
 	var claimed Event
@@ -59,7 +67,7 @@ func (p *Platform) deliverOne(parent context.Context, v *voiceRuntime, now time.
 	err := p.change(func(s *State) error {
 		for i := range s.Events {
 			e := &s.Events[i]
-			if e.Delivery != "pending" {
+			if e.Delivery != "pending" || (alarmPending && !e.Alarm) {
 				continue
 			}
 			if now.Sub(e.At) > deliveryMaxAge {
@@ -75,7 +83,7 @@ func (p *Platform) deliverOne(parent context.Context, v *voiceRuntime, now time.
 			if e.Delivery != "pending" {
 				continue
 			}
-			if !ttsReady(v, *s) {
+			if !ttsReady(v, *s) && (!e.Alarm || v.playPCM == nil) {
 				e.Delivery = "unavailable"
 			} else if claimed.ID == "" {
 				e.Delivery = "playing"
@@ -89,11 +97,28 @@ func (p *Platform) deliverOne(parent context.Context, v *voiceRuntime, now time.
 		return err
 	}
 	result := "delivered"
-	if err := p.playConfiguredSpeech(ctx, v, speech, claimed.Text); err != nil {
+	if claimed.Alarm {
+		v.mu.Lock()
+		v.alarmCancel = cancel
+		v.mu.Unlock()
+	}
+	speechCtx, stopSpeech := context.WithTimeout(ctx, 30*time.Second)
+	if err := p.playConfiguredSpeech(speechCtx, v, speech, claimed.Text); err != nil {
 		result = "failed"
+	}
+	stopSpeech()
+	if claimed.Alarm && ctx.Err() == nil {
+		ringCtx, stopRing := context.WithTimeout(ctx, alarmDuration)
+		if err := v.ring(ringCtx, 2*time.Second); err == nil {
+			result = "delivered"
+		}
+		stopRing()
 	}
 	if ctx.Err() != nil {
 		result = "interrupted"
+		if claimed.Alarm && parent.Err() == nil {
+			result = "alarm_stopped"
+		}
 	}
 	return p.change(func(s *State) error {
 		for i := range s.Events {
@@ -107,7 +132,7 @@ func (p *Platform) deliverOne(parent context.Context, v *voiceRuntime, now time.
 }
 
 func (p *Platform) serveDeliveries(ctx context.Context, v *voiceRuntime) {
-	ticker := time.NewTicker(time.Second)
+	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {

@@ -375,6 +375,7 @@ func main() {
 	wakeSocket := flag.String("oh2p-wake-socket", "", "OH2P 本地唤醒事件套接字")
 	wakeDetector := flag.String("oh2p-wake-detector", "", "OH2P 本地唤醒检测器程序")
 	wakeKeywords := flag.String("oh2p-wake-keywords", "", "OH2P 本地唤醒词文件")
+	alarmButton := flag.String("oh2p-alarm-button-device", "", "OH2P 音箱本机按键设备，用于关闭响铃")
 	notifyWake := flag.String("notify-wake", "", "向正在运行的 OH2P Agent 通知唤醒词后退出")
 	cancelVoice := flag.Bool("cancel-voice", false, "向正在运行的 OH2P Agent 请求取消当前语音")
 	vad := flag.Float64("oh2p-vad-threshold", 1100000, "OH2P 录音 S32 RMS 声音阈值")
@@ -436,7 +437,7 @@ func main() {
 		if oh2p {
 			if arecord, err := exec.LookPath("arecord"); err == nil && *vad > 0 && !math.IsInf(*vad, 0) {
 				probeCapture = func(ctx context.Context, emit func([]byte) error) ([]byte, error) {
-					return captureOH2P(ctx, arecord, *vad, emit)
+					return captureOH2P(ctx, arecord, *vad, 12*time.Second, emit)
 				}
 			}
 		}
@@ -510,6 +511,22 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	defer func() { _ = p.activity.flush() }()
+	if *alarmButton != "" {
+		if !oh2p || voice == nil || !filepath.IsAbs(*alarmButton) {
+			log.Fatal("倒计时按键需要 OH2P 系统语音和设备路径")
+		}
+		input, err := os.Open(*alarmButton)
+		if err != nil {
+			log.Fatal("无法打开倒计时按键设备")
+		}
+		info, err := input.Stat()
+		if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+			input.Close()
+			log.Fatal("倒计时按键路径必须是字符设备")
+		}
+		defer input.Close()
+		go readAlarmButton(input, voice.stopAlarm)
+	}
 	if voice != nil {
 		p.queueSpeech = true
 		if err := p.recoverDeliveries(); err != nil {
@@ -567,7 +584,10 @@ func main() {
 			captureLED = admin.captureLED
 		}
 		capture := func(ctx context.Context, emit func([]byte) error) ([]byte, error) {
-			return captureOH2P(ctx, arecord, *vad, emit)
+			return captureOH2P(ctx, arecord, *vad, 12*time.Second, emit)
+		}
+		voice.follow = func(ctx context.Context, emit func([]byte) error) ([]byte, error) {
+			return captureOH2P(ctx, arecord, *vad, 15*time.Second, emit)
 		}
 		go p.serveWakeSocket(ctx, wakes, voice, capture, captureLED)
 		if *wakeDetector != "" {
@@ -580,7 +600,7 @@ func main() {
 		}
 	}
 	go func() {
-		ticker := time.NewTicker(time.Second)
+		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
 		activityFlush := time.NewTicker(30 * time.Second)
 		defer activityFlush.Stop()

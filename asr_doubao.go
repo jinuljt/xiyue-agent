@@ -49,7 +49,7 @@ func doubaoHeaders(key, resource string) (http.Header, error) {
 }
 
 func recognizeDoubao(parent context.Context, endpoint, resource, key string, source doubaoAudioSource, sentBytes func(int)) (string, error) {
-	ctx, cancel := context.WithTimeout(parent, 25*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 40*time.Second)
 	defer cancel()
 	headers, err := doubaoHeaders(key, resource)
 	if err != nil {
@@ -77,6 +77,19 @@ func recognizeDoubao(parent context.Context, endpoint, resource, key string, sou
 			}
 		})
 	}()
+	var first []byte
+	select {
+	case chunk, ok := <-chunks:
+		if !ok {
+			if err := <-captured; err != nil {
+				return "", err
+			}
+			return "", errNoSpeech
+		}
+		first = chunk
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 	conn, response, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{
 		HTTPHeader: headers,
 		HTTPClient: &http.Client{
@@ -99,7 +112,7 @@ func recognizeDoubao(parent context.Context, endpoint, resource, key string, sou
 	}
 	sent := make(chan error, 1)
 	go func() {
-		buffer := make([]byte, 0, doubaoPacketBytes)
+		buffer := append(make([]byte, 0, doubaoPacketBytes), first...)
 		write := func(kind byte, audio []byte) error {
 			if err := conn.Write(ctx, websocket.MessageBinary, encoder.frame(kind, 0, audio)); err != nil {
 				return errors.New("无法发送豆包语音数据或请求已超时")
@@ -109,8 +122,7 @@ func recognizeDoubao(parent context.Context, endpoint, resource, key string, sou
 			}
 			return nil
 		}
-		for chunk := range chunks {
-			buffer = append(buffer, chunk...)
+		for {
 			for len(buffer) > doubaoPacketBytes {
 				if err := write(0x20, buffer[:doubaoPacketBytes]); err != nil {
 					sent <- err
@@ -119,6 +131,11 @@ func recognizeDoubao(parent context.Context, endpoint, resource, key string, sou
 				}
 				buffer = buffer[doubaoPacketBytes:]
 			}
+			chunk, ok := <-chunks
+			if !ok {
+				break
+			}
+			buffer = append(buffer, chunk...)
 		}
 		err := <-captured
 		if err == nil {

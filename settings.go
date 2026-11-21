@@ -319,6 +319,12 @@ type replyOptions struct {
 	markTextSetup bool
 	transientKey  *string
 	draft         bool
+	history       []voiceMessage
+}
+
+type voiceMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
 func (p *Platform) respond(ctx context.Context, s State, message string, markTextSetup bool) (string, error) {
@@ -353,7 +359,8 @@ func (p *Platform) requestReply(ctx context.Context, s State, message string, op
 	anthropic := service == "llm" && (config.Provider == "anthropic" || config.Provider == "custom_anthropic")
 	if service == "llm" {
 		path := "/chat/completions"
-		params := map[string]any{"model": config.Model, "messages": []map[string]string{{"role": "user", "content": message}}}
+		history := append([]voiceMessage{}, options.history...)
+		params := map[string]any{"model": config.Model, "messages": append(history, voiceMessage{"user", message})}
 		if anthropic {
 			path = "/messages"
 			params["max_tokens"] = 512

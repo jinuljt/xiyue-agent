@@ -34,6 +34,10 @@ type voiceRuntime struct {
 	cancel       context.CancelFunc
 	last         *voiceResult
 	wakeReady    bool
+	follow       voiceCapture
+	conversing   bool
+	following    bool
+	alarmCancel  context.CancelFunc
 }
 
 type voiceCapture func(context.Context, func([]byte) error) ([]byte, error)
@@ -54,7 +58,7 @@ func (v *voiceRuntime) status() any {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return map[string]any{"available": true, "cloud_tts_available": v.playPCM != nil, "busy": v.active, "last_turn": v.last, "wake_detector_ready": v.wakeReady}
+	return map[string]any{"available": true, "cloud_tts_available": v.playPCM != nil, "busy": v.active, "last_turn": v.last, "wake_detector_ready": v.wakeReady, "alarm_ringing": v.alarmCancel != nil, "listening_followup": v.following}
 }
 
 func (v *voiceRuntime) setWakeReady(ready bool) {
@@ -140,7 +144,9 @@ func (p *Platform) captureAndTranscribe(ctx context.Context, s State, capture vo
 		if err != nil {
 			u.ErrorCode = "recognition_failed"
 		}
-		p.activity.add(u, s.Settings.Timezone)
+		if sent.Load() > 0 || (err != nil && !errors.Is(err, errNoSpeech) && !errors.Is(err, context.Canceled)) {
+			p.activity.add(u, s.Settings.Timezone)
+		}
 		result.CaptureMS = captureTime.Milliseconds()
 		result.Stage = "asr"
 		result.ASRMS = (time.Since(start) - captureTime).Milliseconds()
@@ -296,7 +302,22 @@ func (v *voiceRuntime) stopTurn() {
 		v.cancel()
 	}
 }
+
+func (v *voiceRuntime) stopAlarm() bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.alarmCancel == nil {
+		return false
+	}
+	v.alarmCancel()
+	return true
+}
+
 func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture voiceCapture, captureLED func(bool)) (result voiceResult, err error) {
+	return p.runSpeechTurn(parent, v, capture, captureLED, nil, false)
+}
+
+func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, capture voiceCapture, captureLED func(bool), history *[]voiceMessage, cue bool) (result voiceResult, err error) {
 	v.mu.Lock()
 	if v.active {
 		v.mu.Unlock()
@@ -304,6 +325,7 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 	}
 	ctx, cancel := context.WithTimeout(parent, 50*time.Second)
 	v.active, v.cancel = true, cancel
+	v.following = history != nil && !cue
 	v.mu.Unlock()
 	var transcript, response string
 	defer func() {
@@ -314,29 +336,41 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 			}
 		}
 		cancel()
-		if result.Stage != "confirmed_on_device" && (transcript != "" || result.Stage == "asr" || result.Stage == "capture") {
+		if result.Stage != "confirmed_on_device" && !errors.Is(err, errNoSpeech) && (transcript != "" || result.Stage == "asr" || result.Stage == "capture") {
 			p.activity.dialogue(transcript, response, result)
 		}
 		v.mu.Lock()
 		defer v.mu.Unlock()
 		v.active = false
+		v.following = false
 		v.cancel = nil
-		v.last = &result
+		if !errors.Is(err, errNoSpeech) {
+			v.last = &result
+		}
 	}()
 	s := p.snapshot()
 	result.Revision = s.Settings.Revision
 	result.Stage = "configuration"
-	if !asrReady(s.Settings.ASR) {
-		return result, errors.New("请先配置自建 SenseVoice 或豆包语音识别")
-	}
-	result.Stage = "capture"
-	text, err := p.captureAndTranscribe(ctx, s, func(ctx context.Context, emit func([]byte) error) ([]byte, error) {
+	listen := func() (string, error) {
 		if captureLED != nil {
 			captureLED(true)
 			defer captureLED(false)
 		}
-		return capture(ctx, emit)
-	}, nil, &result, false)
+		if cue {
+			cueContext, stop := context.WithTimeout(ctx, time.Second)
+			_ = v.playTone(cueContext, wakeTone)
+			stop()
+		}
+		if !asrReady(s.Settings.ASR) {
+			return "", errors.New("请先配置自建 SenseVoice 或豆包语音识别")
+		}
+		result.Stage = "capture"
+		return p.captureAndTranscribe(ctx, s, capture, nil, &result, false)
+	}
+	text, err := listen()
+	v.mu.Lock()
+	v.following = false
+	v.mu.Unlock()
 	if err != nil {
 		return result, err
 	}
@@ -349,20 +383,35 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 		return result, nil
 	}
 	transcript = text
+	switch strings.TrimRight(strings.TrimSpace(command), "。！？.!?") {
+	case "结束对话", "退出对话", "再见":
+		result.Stage = "conversation_ended"
+		return result, nil
+	case "停止响铃", "关闭闹铃", "停止":
+		if v.stopAlarm() {
+			result.Stage = "alarm_stopped"
+			return result, nil
+		}
+	}
 	if !ttsReady(v, s) {
 		result.Stage = "configuration"
 		return result, errors.New("请配置系统语音或可用的豆包语音合成服务")
 	}
 	result.Stage = "local_task"
-	reply, handled, err := p.voiceTask(command, time.Now().UTC())
+	taskReply, err := p.voiceTask(command, time.Now().UTC())
 	if err != nil {
 		return result, err
 	}
-	if !handled {
+	reply := taskReply.text
+	if !taskReply.handled {
 		result.modelUsed = true
 		result.Stage = "model"
 		start := time.Now()
-		reply, err = p.respond(ctx, s, text, false)
+		var previous []voiceMessage
+		if history != nil {
+			previous = *history
+		}
+		reply, err = p.requestReply(ctx, s, text, replyOptions{history: previous})
 		result.ModelMS = time.Since(start).Milliseconds()
 		if err != nil {
 			return result, err
@@ -371,11 +420,23 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 	result.Stage = "playback"
 	response = reply
 	start := time.Now()
-	err = p.playConfiguredSpeech(ctx, v, s, reply)
+	if taskReply.timer && v.playPCM != nil {
+		cueContext, stop := context.WithTimeout(ctx, time.Second)
+		err = v.playTone(cueContext, wakeTone)
+		stop()
+	} else {
+		err = p.playConfiguredSpeech(ctx, v, s, reply)
+	}
 	result.PlaybackMS = time.Since(start).Milliseconds()
 	if err != nil {
 		return result, err
 	}
 	result.Stage = "completed"
+	if history != nil {
+		*history = append(*history, voiceMessage{"user", clipDialogue(text)}, voiceMessage{"assistant", clipDialogue(reply)})
+		if len(*history) > 8 {
+			*history = (*history)[len(*history)-8:]
+		}
+	}
 	return result, nil
 }

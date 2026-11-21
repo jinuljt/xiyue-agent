@@ -54,6 +54,7 @@ type Task struct {
 	ResumeStatus string     `json:"resume_status,omitempty"`
 }
 type Event struct {
+	Alarm    bool      `json:"alarm,omitempty"`
 	Delivery string    `json:"delivery,omitempty"`
 	ID       string    `json:"id"`
 	TaskID   string    `json:"task_id"`
@@ -293,7 +294,7 @@ func configValues(a Ability, overrides map[string]string) (map[string]string, er
 	return values, nil
 }
 func emit(s *State, t *Task, kind, text string, now time.Time) {
-	e := Event{ID: newID(), TaskID: t.ID, Kind: kind, Text: text, At: now}
+	e := Event{ID: newID(), TaskID: t.ID, Kind: kind, Text: text, At: now, Alarm: kind == "speech" && t.AbilityID == quickTimer.ID}
 	if kind == "speech" && s.queueSpeech {
 		pending := 0
 		for _, queued := range s.Events {
@@ -478,6 +479,7 @@ func tick(s *State, now time.Time) {
 		t := &s.Tasks[i]
 		if t.Status == "timer" && t.DueAt != nil && !now.Before(*t.DueAt) {
 			emit(s, t, "speech", "计时结束："+t.Title, now)
+			s.Events[len(s.Events)-1].Alarm = true
 			t.Index++
 			advance(s, t, now)
 		}

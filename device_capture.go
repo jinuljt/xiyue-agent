@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,10 +22,13 @@ const (
 	captureLimitFrames  = 600
 )
 
-func captureOH2P(ctx context.Context, arecord string, threshold float64, emit func([]byte) error) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, 14*time.Second)
+var errNoSpeech = errors.New("未检测到足够的说话声")
+
+func captureOH2P(ctx context.Context, arecord string, threshold float64, wait time.Duration, emit func([]byte) error) ([]byte, error) {
+	duration := wait + 12*time.Second
+	ctx, cancel := context.WithTimeout(ctx, duration+2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, arecord, "--quiet", "-D", "noop", "-t", "raw", "-f", "S32_LE", "-r", "16000", "-c", "4", "-d", "12")
+	cmd := exec.CommandContext(ctx, arecord, "--quiet", "-D", "noop", "-t", "raw", "-f", "S32_LE", "-r", "16000", "-c", "4", "-d", strconv.Itoa(int(duration/time.Second)))
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -33,7 +37,7 @@ func captureOH2P(ctx context.Context, arecord string, threshold float64, emit fu
 		return nil, errors.New("无法启动音箱录音")
 	}
 	stopReading := context.AfterFunc(ctx, func() { _ = out.Close() })
-	wav, captureErr := readOH2PClip(out, threshold, emit)
+	wav, captureErr := readOH2PClip(out, threshold, int(wait/(20*time.Millisecond)), emit)
 	waitErr := cmd.Process.Kill()
 	_ = cmd.Wait() // Early end-of-speech intentionally terminates arecord.
 	stopReading()
@@ -49,12 +53,16 @@ func captureOH2P(ctx context.Context, arecord string, threshold float64, emit fu
 	return wav, nil
 }
 
-func readOH2PClip(src io.Reader, threshold float64, emit func([]byte) error) ([]byte, error) {
+func readOH2PClip(src io.Reader, threshold float64, waitFrames int, emit func([]byte) error) ([]byte, error) {
 	var frame [captureFrameSamples * 4 * 4]byte
 	// Keep up to 200 ms before speech onset, and use only the first microphone.
 	audio := make([]int32, 0, captureFrameSamples*18)
 	loud, quiet := 0, 0
-	for n := 0; n < captureLimitFrames; n++ {
+	speechStart := -1
+	for n := 0; ; n++ {
+		if (speechStart < 0 && n >= waitFrames) || (speechStart >= 0 && n-speechStart >= captureLimitFrames) {
+			break
+		}
 		if _, err := io.ReadFull(src, frame[:]); err != nil {
 			if errors.Is(err, io.EOF) {
 				break
@@ -76,6 +84,9 @@ func readOH2PClip(src io.Reader, threshold float64, emit func([]byte) error) ([]
 			quiet = 0
 		} else if loud > 0 {
 			quiet++
+		}
+		if loud >= 8 && speechStart < 0 {
+			speechStart = n
 		}
 		if emit != nil && loud >= 8 {
 			var pcm [captureFrameSamples * 2]byte
@@ -101,7 +112,7 @@ func readOH2PClip(src io.Reader, threshold float64, emit func([]byte) error) ([]
 		}
 	}
 	if loud < 8 {
-		return nil, errors.New("未检测到足够的说话声")
+		return nil, errNoSpeech
 	}
 	if emit != nil {
 		return nil, nil
@@ -188,17 +199,35 @@ func (p *Platform) serveWakeSocket(ctx context.Context, listener net.Listener, v
 }
 
 func (p *Platform) runDeviceWake(ctx context.Context, v *voiceRuntime, capture voiceCapture, setLED func(bool)) {
-	result, err := p.runVoiceTurn(ctx, v, capture, setLED)
-	if err != nil || result.Stage != "completed" || !result.modelUsed {
+	v.mu.Lock()
+	if v.conversing || v.active {
+		v.mu.Unlock()
 		return
 	}
-	_ = p.change(func(s *State) error {
-		if s.Settings.Revision != result.Revision || s.Settings.DeviceSetupComplete {
-			return errNoVoiceChange
+	v.conversing = true
+	v.mu.Unlock()
+	defer func() { v.mu.Lock(); v.conversing = false; v.mu.Unlock() }()
+	var history []voiceMessage
+	first := true
+	for ctx.Err() == nil {
+		result, err := p.runSpeechTurn(ctx, v, capture, setLED, &history, first)
+		if err != nil || result.Stage != "completed" {
+			return
 		}
-		s.Settings.DeviceSetupComplete = true
-		return nil
-	})
+		if result.modelUsed {
+			_ = p.change(func(s *State) error {
+				if s.Settings.Revision != result.Revision || s.Settings.DeviceSetupComplete {
+					return errNoVoiceChange
+				}
+				s.Settings.DeviceSetupComplete = true
+				return nil
+			})
+		}
+		if v.follow == nil {
+			return
+		}
+		first, capture = false, v.follow
+	}
 }
 
 func (p *Platform) serveWakeDetector(ctx context.Context, binary, keywords string, v *voiceRuntime, capture voiceCapture, setLED func(bool)) {
@@ -238,8 +267,12 @@ func (p *Platform) runWakeDetector(parent context.Context, binary, keywords stri
 			v.setWakeReady(true)
 			log.Print("喜悦 Agent 本机唤醒检测器已就绪")
 		}
-		if word, ok := detectedWakeWord(line); ok && word == p.snapshot().Settings.WakeWord {
-			go p.runDeviceWake(parent, v, capture, setLED)
+		if word, ok := detectedWakeWord(line); ok {
+			if word == "停止" {
+				v.stopAlarm()
+			} else if word == p.snapshot().Settings.WakeWord {
+				go p.runDeviceWake(parent, v, capture, setLED)
+			}
 		}
 	}
 	stop()
@@ -261,7 +294,7 @@ func wakeKeywordLabels(path string) (map[string]bool, error) {
 	scanner := bufio.NewScanner(io.LimitReader(file, 16<<10))
 	for scanner.Scan() {
 		_, label, found := strings.Cut(scanner.Text(), "@")
-		if label = strings.TrimSpace(label); found && label != "" {
+		if label = strings.TrimSpace(label); found && label != "" && label != "停止" {
 			labels[label] = true
 		}
 	}

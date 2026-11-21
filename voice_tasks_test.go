@@ -13,11 +13,11 @@ func TestSpokenTimersUseLocalScheduling(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	for _, phrase := range []string{"三分钟后，提醒我取茶。", "计时10秒", "倒计时一秒钟。"} {
-		if answer, handled, err := p.voiceTask(phrase, now); !handled || err != nil || answer == "" {
-			t.Fatalf("voice task %q: %q %t %v", phrase, answer, handled, err)
+		if reply, err := p.voiceTask(phrase, now); !reply.handled || err != nil || reply.text == "" {
+			t.Fatalf("voice task %q: %+v %v", phrase, reply, err)
 		}
 	}
-	if _, handled, err := p.voiceTask("如何做三分钟后提醒我的程序", now); handled || err != nil {
+	if reply, err := p.voiceTask("如何做三分钟后提醒我的程序", now); reply.handled || err != nil {
 		t.Fatal("informational request should not act")
 	}
 	s := p.snapshot()

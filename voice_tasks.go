@@ -40,7 +40,13 @@ var quickTimer = Manifest{
 	Steps:  []Step{{Kind: "say", Text: "{{content}}"}},
 }
 
-func (p *Platform) voiceTask(text string, now time.Time) (string, bool, error) {
+type voiceTaskReply struct {
+	text    string
+	handled bool
+	timer   bool
+}
+
+func (p *Platform) voiceTask(text string, now time.Time) (voiceTaskReply, error) {
 	text = strings.TrimRight(strings.TrimSpace(text), "。！？.!? ")
 	if text == "继续下一步" || text == "完成当前任务" {
 		reply := "继续。"
@@ -65,7 +71,7 @@ func (p *Platform) voiceTask(text string, now time.Time) (string, bool, error) {
 		if errors.Is(err, errNoVoiceChange) {
 			err = nil
 		}
-		return reply, true, err
+		return voiceTaskReply{text: reply, handled: true}, err
 	}
 	match := remindAfter.FindStringSubmatch(text)
 	ability := "reminder"
@@ -74,7 +80,7 @@ func (p *Platform) voiceTask(text string, now time.Time) (string, bool, error) {
 		ability = quickTimer.ID
 	}
 	if match == nil {
-		return "", false, nil
+		return voiceTaskReply{}, nil
 	}
 	n := voiceNumber(match[1])
 	unit := time.Second
@@ -85,7 +91,7 @@ func (p *Platform) voiceTask(text string, now time.Time) (string, bool, error) {
 		unit = time.Hour
 	}
 	if n < 1 || n > 86400/int(unit/time.Second) {
-		return "请设置一天以内的提醒或计时。", true, nil
+		return voiceTaskReply{text: "请设置一天以内的提醒或计时。", handled: true}, nil
 	}
 	duration := time.Duration(n) * unit
 	content := "计时结束。"
@@ -93,9 +99,18 @@ func (p *Platform) voiceTask(text string, now time.Time) (string, bool, error) {
 		content = strings.TrimSpace(match[3])
 	}
 	if content == "" || len(content) > 2000 {
-		return "请简短说出要提醒的事情。", true, nil
+		return voiceTaskReply{text: "请简短说出要提醒的事情。", handled: true}, nil
 	}
 	err := p.change(func(s *State) error {
+		if ability == quickTimer.ID {
+			kept := s.Schedules[:0]
+			for _, schedule := range s.Schedules {
+				if schedule.AbilityID != quickTimer.ID || schedule.Enabled {
+					kept = append(kept, schedule)
+				}
+			}
+			s.Schedules = kept
+		}
 		if len(s.Schedules) >= 100 {
 			return errors.New("定时计划已满")
 		}
@@ -114,9 +129,9 @@ func (p *Platform) voiceTask(text string, now time.Time) (string, bool, error) {
 		return nil
 	})
 	if err != nil {
-		return "", true, err
+		return voiceTaskReply{handled: true}, err
 	}
-	return fmt.Sprintf("好的，已设定%s%s。", match[1], match[2]), true, nil
+	return voiceTaskReply{text: fmt.Sprintf("好的，已设定%s%s。", match[1], match[2]), handled: true, timer: ability == quickTimer.ID}, nil
 }
 
 var errNoVoiceChange = errors.New("没有要保存的语音任务变更")
