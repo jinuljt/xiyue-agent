@@ -30,10 +30,16 @@ type ownerState struct {
 }
 
 type adminGate struct {
-	host        string
-	codePath    string
-	mu          sync.Mutex
-	lastAttempt time.Time
+	host            string
+	codePath        string
+	mu              sync.Mutex
+	lastAttempt     time.Time
+	lastDeviceStart time.Time
+	pending         *deviceLogin
+	voiceLogin      bool
+	buttonReady     bool
+	buttonLED       func(bool)
+	buttonLabel     string
 }
 
 func digest(value string) string {
@@ -177,22 +183,78 @@ func (a *api) authenticateOwner(w http.ResponseWriter, r *http.Request, useCode 
 		}
 		owner = *current
 	}
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		http.Error(w, "无法创建管理会话", 500)
-		return
-	}
-	session := base64.RawURLEncoding.EncodeToString(raw)
-	owner.ExpiresAt = now.Add(30 * 24 * time.Hour)
-	owner.SessionDigest = digest(session)
-	if err := a.platform.change(func(s *State) error {
-		s.Owner = &owner
-		return nil
-	}); err != nil {
+	if err := a.issueOwnerSession(w, owner, ""); err != nil {
 		bad(w, err)
 		return
 	}
+	g.clearDeviceLogin()
+	writeJSON(w, 200, map[string]bool{"authenticated": true})
+}
+
+func (a *api) issueOwnerSession(w http.ResponseWriter, owner ownerState, previous string) error {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return errors.New("无法创建管理会话")
+	}
+	session := base64.RawURLEncoding.EncodeToString(raw)
+	owner.ExpiresAt = time.Now().Add(30 * 24 * time.Hour)
+	owner.SessionDigest = digest(session)
+	if err := a.platform.change(func(s *State) error {
+		if previous != "" && (s.Owner == nil || s.Owner.SessionDigest != previous || !time.Now().Before(s.Owner.ExpiresAt)) {
+			return errors.New("登录已失效，请重新登录")
+		}
+		s.Owner = &owner
+		return nil
+	}); err != nil {
+		return err
+	}
 	http.SetCookie(w, ownerCookie(session, owner.ExpiresAt))
+	return nil
+}
+
+func (a *api) changeOwnerPassword(w http.ResponseWriter, r *http.Request) {
+	g := a.admin
+	if g == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Header.Get("Origin") == "" {
+		writeJSON(w, 403, map[string]string{"error": "请从控制台页面继续"})
+		return
+	}
+	var in struct{ Password string }
+	if err := decode(w, r, &in); err != nil {
+		bad(w, err)
+		return
+	}
+	if len([]rune(in.Password)) < 12 || len(in.Password) > 256 {
+		bad(w, errors.New("请使用至少 12 个字符的密码"))
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	cookie, err := r.Cookie(sessionCookie)
+	owner := a.platform.snapshot().Owner
+	if err != nil || owner == nil || owner.SessionDigest != digest(cookie.Value) || !time.Now().Before(owner.ExpiresAt) {
+		writeJSON(w, 401, map[string]string{"error": "登录已失效，请重新登录"})
+		return
+	}
+	previous := owner.SessionDigest
+	owner.PasswordSalt = make([]byte, 16)
+	if _, err := rand.Read(owner.PasswordSalt); err != nil {
+		http.Error(w, "无法修改密码", 500)
+		return
+	}
+	owner.PasswordHash, err = passwordHash(in.Password, owner.PasswordSalt)
+	if err != nil {
+		http.Error(w, "无法修改密码", 500)
+		return
+	}
+	if err := a.issueOwnerSession(w, *owner, previous); err != nil {
+		bad(w, err)
+		return
+	}
+	g.clearDeviceLogin()
 	writeJSON(w, 200, map[string]bool{"authenticated": true})
 }
 
@@ -203,9 +265,20 @@ func (a *api) adminRoutes(m *http.ServeMux) {
 		owner := a.platform.state.Owner
 		configured := owner != nil && len(owner.PasswordHash) == 32
 		a.platform.mu.Unlock()
-		writeJSON(w, 200, map[string]bool{"required": required, "authenticated": !required || a.platform.authenticated(r),
-			"configured": configured})
+		status := map[string]bool{"required": required, "authenticated": !required || a.platform.authenticated(r),
+			"configured": configured}
+		if g := a.admin; g != nil && configured {
+			g.mu.Lock()
+			status["device_button"] = g.buttonReady
+			status["device_voice"] = g.voiceLogin && asrReady(a.platform.snapshot().Settings.ASR)
+			g.mu.Unlock()
+		}
+		writeJSON(w, 200, status)
 	})
+	m.HandleFunc("POST /api/session/device", a.deviceLoginAction)
+	m.HandleFunc("POST /api/session/device/claim", a.deviceLoginAction)
+	m.HandleFunc("DELETE /api/session/device", a.deviceLoginAction)
+	m.HandleFunc("POST /api/session/password", a.changeOwnerPassword)
 	m.HandleFunc("POST /api/session/pair", func(w http.ResponseWriter, r *http.Request) {
 		a.authenticateOwner(w, r, true)
 	})

@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -335,7 +336,9 @@ func (a *api) guard(next http.Handler) http.Handler {
 				http.NotFound(w, r)
 				return
 			case r.Method == http.MethodGet && r.URL.Path == "/api/session":
-			case r.Method == http.MethodPost && (r.URL.Path == "/api/session/pair" || r.URL.Path == "/api/session/login"):
+			case r.Method == http.MethodPost && (r.URL.Path == "/api/session/pair" || r.URL.Path == "/api/session/login" ||
+				r.URL.Path == "/api/session/device" || r.URL.Path == "/api/session/device/claim"):
+			case r.Method == http.MethodDelete && r.URL.Path == "/api/session/device":
 			case !a.platform.authenticated(r):
 				writeJSON(w, 401, map[string]string{"error": "请先配对并登录音箱"})
 				return
@@ -360,6 +363,9 @@ func main() {
 	tlsKey := flag.String("admin-tls-key", "", "HTTPS 私钥路径")
 	pairFile := flag.String("admin-pairing-file", "", "仅本机所有者可读写的配对或恢复码文件")
 	newAdminCode := flag.Bool("new-admin-code", false, "只为指定的管理码文件生成一次性设置或恢复码")
+	buttonInput := flag.String("admin-button-device", "", "音箱确认按键的 Linux evdev 路径")
+	buttonKey := flag.Uint("admin-button-key", 0, "已验证用于登录的实体键 EV_KEY 编号")
+	buttonLabel := flag.String("admin-button-label", "", "控制台显示的实体按键名称")
 	flag.Parse()
 	if *newAdminCode {
 		if err := writeAdminCode(*pairFile); err != nil {
@@ -460,6 +466,28 @@ func main() {
 		}
 		go p.serveDeliveries(ctx, voice)
 	}
+	if *buttonInput != "" || *buttonKey != 0 || *buttonLabel != "" {
+		if admin == nil || runtime.GOOS != "linux" || !filepath.IsAbs(*buttonInput) ||
+			*buttonKey == 0 || *buttonKey > 767 || strings.TrimSpace(*buttonLabel) == "" {
+			log.Fatal("实体键登录需要 HTTPS、已验证的 evdev 路径、键码和按键名称")
+		}
+		button, err := os.Open(*buttonInput)
+		if err != nil {
+			log.Fatal("无法打开实体按键设备")
+		}
+		info, err := button.Stat()
+		if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+			button.Close()
+			log.Fatal("实体按键路径必须是字符设备")
+		}
+		admin.buttonReady, admin.buttonLabel, admin.buttonLED = true, *buttonLabel, oh2pListeningLED
+		defer func() {
+			admin.mu.Lock()
+			defer admin.mu.Unlock()
+			admin.clearDeviceLogin()
+		}()
+		go serveAdminButton(ctx, button, uint16(*buttonKey), admin)
+	}
 	if *wakeSocket != "" {
 		if voice == nil || !(*vad > 0) || math.IsInf(*vad, 0) {
 			log.Fatal("OH2P 唤醒套接字需要系统语音及有效录音阈值")
@@ -473,7 +501,13 @@ func main() {
 			log.Fatalf("无法启动 OH2P 唤醒套接字: %v", e)
 		}
 		defer wakes.Close()
-		go p.serveWakeSocket(ctx, wakes, voice, func(ctx context.Context) ([]byte, error) { return captureOH2P(ctx, arecord, *vad) }, oh2pListeningLED)
+		captureLED := oh2pListeningLED
+		if admin != nil {
+			admin.voiceLogin = true
+			voice.confirmLogin = admin.confirmVoiceLogin
+			captureLED = admin.captureLED
+		}
+		go p.serveWakeSocket(ctx, wakes, voice, func(ctx context.Context) ([]byte, error) { return captureOH2P(ctx, arecord, *vad) }, captureLED)
 	}
 	go func() {
 		ticker := time.NewTicker(time.Second)

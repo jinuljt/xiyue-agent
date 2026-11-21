@@ -25,12 +25,13 @@ const (
 )
 
 type voiceRuntime struct {
-	speak   func(context.Context, string) error
-	playPCM pcmPlayer
-	mu      sync.Mutex
-	active  bool
-	cancel  context.CancelFunc
-	last    *voiceResult
+	confirmLogin func(string) bool
+	speak        func(context.Context, string) error
+	playPCM      pcmPlayer
+	mu           sync.Mutex
+	active       bool
+	cancel       context.CancelFunc
+	last         *voiceResult
 }
 
 type voiceResult struct {
@@ -261,9 +262,6 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 	s := p.snapshot()
 	result.Revision = s.Settings.Revision
 	result.Stage = "configuration"
-	if !ttsReady(v, s) {
-		return result, errors.New("请配置系统语音或可用的豆包语音合成服务")
-	}
 	if !asrReady(s.Settings.ASR) {
 		return result, errors.New("请先配置自建 SenseVoice 或豆包语音识别")
 	}
@@ -286,6 +284,14 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 	result.ASRMS = time.Since(start).Milliseconds()
 	if err != nil {
 		return result, err
+	}
+	if v.confirmLogin != nil && v.confirmLogin(text) {
+		result.Stage = "confirmed_on_device"
+		return result, nil
+	}
+	if !ttsReady(v, s) {
+		result.Stage = "configuration"
+		return result, errors.New("请配置系统语音或可用的豆包语音合成服务")
 	}
 	result.Stage = "local_task"
 	reply, handled, err := p.voiceTask(text, time.Now().UTC())

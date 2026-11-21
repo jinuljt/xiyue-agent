@@ -447,7 +447,7 @@ func (a *api) serviceStatus(s State) map[string]serviceStatus {
 		a.voice.mu.Lock()
 		if turn := a.voice.last; turn != nil && turn.Revision == config.Revision {
 			switch turn.Stage {
-			case "completed", "playback", "model", "local_task":
+			case "completed", "playback", "model", "local_task", "confirmed_on_device":
 				services["asr"] = serviceStatus{Provider: config.ASR.Provider, State: "succeeded"}
 			case "asr":
 				services["asr"] = serviceStatus{Provider: config.ASR.Provider, State: "failed"}
