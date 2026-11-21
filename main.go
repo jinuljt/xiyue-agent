@@ -336,7 +336,7 @@ func (a *api) guard(next http.Handler) http.Handler {
 				http.NotFound(w, r)
 				return
 			case r.Method == http.MethodGet && r.URL.Path == "/api/session":
-			case r.Method == http.MethodPost && (r.URL.Path == "/api/session/login" ||
+			case r.Method == http.MethodPost && (r.URL.Path == "/api/session/login" || r.URL.Path == "/api/session/setup" ||
 				r.URL.Path == "/api/session/device" || r.URL.Path == "/api/session/device/claim"):
 			case r.Method == http.MethodDelete && r.URL.Path == "/api/session/device":
 			case !a.platform.authenticated(r):

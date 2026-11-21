@@ -9,6 +9,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/netip"
 	"path/filepath"
 	"time"
 )
@@ -100,4 +102,72 @@ func sendOwnerSetup(path string, stdin io.Reader) error {
 		return errors.New(string(result))
 	}
 	return nil
+}
+
+// Check the TCP peers directly. Forwarded headers are never an installation credential.
+func sameSetupNetwork(r *http.Request) bool {
+	local, ok := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr)
+	if !ok {
+		return false
+	}
+	localIP, ok := netip.AddrFromSlice(local.IP)
+	if !ok {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	peer, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	localIP, peer = localIP.Unmap(), peer.Unmap().WithZone("")
+	if localIP.IsLoopback() {
+		return peer.IsLoopback()
+	}
+	addresses, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, address := range addresses {
+		ip, network, err := net.ParseCIDR(address.String())
+		if err == nil && ip.Equal(localIP.AsSlice()) && network.Contains(peer.AsSlice()) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *api) setupOwnerOnConsole(w http.ResponseWriter, r *http.Request) {
+	g := a.admin
+	if g == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Header.Get("Origin") == "" || !sameSetupNetwork(r) {
+		writeJSON(w, 403, map[string]string{"error": "请在音箱所在的局域网打开控制台"})
+		return
+	}
+	var request ownerRequest
+	if err := decode(w, r, &request); err != nil {
+		bad(w, err)
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if owner := a.platform.snapshot().Owner; owner != nil && len(owner.PasswordHash) == 32 {
+		writeJSON(w, 409, map[string]string{"error": "管理员已设置，请直接登录"})
+		return
+	}
+	if err := a.platform.provisionOwner(request); err != nil {
+		bad(w, err)
+		return
+	}
+	owner := a.platform.snapshot().Owner
+	if err := a.issueOwnerSession(w, *owner, ""); err != nil {
+		bad(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"authenticated": true})
 }

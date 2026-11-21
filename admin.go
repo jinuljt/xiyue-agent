@@ -194,6 +194,9 @@ func (a *api) adminRoutes(m *http.ServeMux) {
 		a.platform.mu.Unlock()
 		status := map[string]bool{"required": required, "authenticated": !required || a.platform.authenticated(r),
 			"configured": configured}
+		if required && !configured {
+			status["setup_available"] = sameSetupNetwork(r)
+		}
 		if g := a.admin; g != nil && configured {
 			g.mu.Lock()
 			status["device_button"] = g.buttonReady
@@ -206,6 +209,7 @@ func (a *api) adminRoutes(m *http.ServeMux) {
 	m.HandleFunc("POST /api/session/device/claim", a.deviceLoginAction)
 	m.HandleFunc("DELETE /api/session/device", a.deviceLoginAction)
 	m.HandleFunc("POST /api/session/password", a.changeOwnerPassword)
+	m.HandleFunc("POST /api/session/setup", a.setupOwnerOnConsole)
 	m.HandleFunc("POST /api/session/login", a.authenticateOwner)
 	m.HandleFunc("POST /api/session/logout", func(w http.ResponseWriter, r *http.Request) {
 		if a.admin == nil {
