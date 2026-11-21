@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -14,12 +15,21 @@ func TestSpeakerDialoguePolicyExecutesAndEnds(t *testing.T) {
 	modelCalls := 0
 	utterance := "我得去忙别的了"
 	modelReply := `{"action":"end"}`
+	var led atomic.Bool
+	var modelOffline bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !led.Load() {
+			t.Error("speaker indicator turned off during speech recognition or model processing")
+		}
 		if r.URL.Path == "/v1/audio/transcriptions" {
 			_ = json.NewEncoder(w).Encode(map[string]string{"text": utterance})
 			return
 		}
 		modelCalls++
+		if modelOffline {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
 		var request struct{ Messages []voiceMessage }
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil ||
 			len(request.Messages) != 2 || request.Messages[0].Content != speakerInstructions {
@@ -42,13 +52,18 @@ func TestSpeakerDialoguePolicyExecutesAndEnds(t *testing.T) {
 	}
 	v := &voiceRuntime{}
 	var spoken []string
-	v.speak = func(_ context.Context, text string) error { spoken = append(spoken, text); return nil }
+	v.speak = func(_ context.Context, text string) error {
+		if !led.Load() {
+			t.Error("speaker indicator turned off before playback")
+		}
+		spoken = append(spoken, text)
+		return nil
+	}
 	capture := func(context.Context, func([]byte) error) ([]byte, error) { return fixtureWAV(), nil }
-	var led bool
 	run := func() voiceResult {
 		t.Helper()
-		result, err := p.runVoiceTurn(context.Background(), v, capture, func(on bool) { led = on })
-		if err != nil || led || v.active {
+		result, err := p.runVoiceTurn(context.Background(), v, capture, led.Store)
+		if err != nil || led.Load() || v.active {
 			t.Fatalf("turn did not return to idle: %v, %v", result, err)
 		}
 		return result
@@ -74,6 +89,11 @@ func TestSpeakerDialoguePolicyExecutesAndEnds(t *testing.T) {
 	modelReply = `{"action":"speak","speech":"预计有雨。早上出门带伞。可以多关注一下。"}`
 	if got := run(); got.Stage != "completed" || spoken[len(spoken)-1] != "预计有雨。早上出门带伞。" {
 		t.Fatal("mixed request must continue and stay concise", spoken)
+	}
+	modelOffline = true
+	result, err := p.runVoiceTurn(context.Background(), v, capture, led.Store)
+	if err == nil || result.Stage != "model" || led.Load() || v.active {
+		t.Fatalf("model failure did not clear indicator and return to idle: %+v %v", result, err)
 	}
 }
 

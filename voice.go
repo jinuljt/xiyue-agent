@@ -329,6 +329,9 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 	v.mu.Unlock()
 	var transcript, response string
 	defer func() {
+		if captureLED != nil {
+			captureLED(false)
+		}
 		if ctx.Err() != nil {
 			result.Stage = "cancelled"
 			if err == nil {
@@ -351,11 +354,10 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 	s := p.snapshot()
 	result.Revision = s.Settings.Revision
 	result.Stage = "configuration"
+	if captureLED != nil {
+		captureLED(true)
+	}
 	listen := func() (string, error) {
-		if captureLED != nil {
-			captureLED(true)
-			defer captureLED(false)
-		}
 		if cue {
 			cueContext, stop := context.WithTimeout(ctx, time.Second)
 			_ = v.playTone(cueContext, wakeTone)
