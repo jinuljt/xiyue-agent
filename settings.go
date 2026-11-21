@@ -154,9 +154,34 @@ func (p *Platform) secretCipher(create bool) (cipher.AEAD, error) {
 	}
 	return cipher.NewGCM(block)
 }
-func (p *Platform) seal(name, secret string) (string, error) {
+func validateServiceKey(secret string) error {
 	if len(secret) > 8192 || strings.TrimSpace(secret) == "" || strings.ContainsAny(secret, "\r\n") {
-		return "", errors.New("密钥为空、过长或包含换行")
+		return errors.New("密钥为空、过长或包含换行")
+	}
+	return nil
+}
+
+func normalizeServiceInput(name string, input ServiceInput) (ServiceConfig, error) {
+	known := false
+	for _, option := range providers()[name] {
+		if option.ID == input.Provider {
+			known = true
+			break
+		}
+	}
+	if !known || len(input.Model) > 200 {
+		return ServiceConfig{}, errors.New("服务商或模型配置无效")
+	}
+	endpoint := strings.TrimRight(strings.TrimSpace(input.Endpoint), "/")
+	if err := validateEndpoint(endpoint); err != nil {
+		return ServiceConfig{}, err
+	}
+	return ServiceConfig{Provider: input.Provider, Endpoint: endpoint, Model: strings.TrimSpace(input.Model)}, nil
+}
+
+func (p *Platform) seal(name, secret string) (string, error) {
+	if err := validateServiceKey(secret); err != nil {
+		return "", err
 	}
 	aead, err := p.secretCipher(true)
 	if err != nil {
@@ -202,17 +227,8 @@ func (p *Platform) saveSettings(in SettingsInput) error {
 		}
 		next := SystemConfig{SetupComplete: s.Settings.SetupComplete, DeviceSetupComplete: s.Settings.DeviceSetupComplete, Revision: in.Revision + 1, Name: strings.TrimSpace(in.Name), WakeWord: strings.TrimSpace(in.WakeWord), Timezone: in.Timezone, Mode: in.Mode}
 		for name, input := range map[string]ServiceInput{"asr": in.ASR, "llm": in.LLM, "tts": in.TTS, "external": in.External} {
-			known := false
-			for _, option := range providers()[name] {
-				if option.ID == input.Provider {
-					known = true
-				}
-			}
-			if !known || len(input.Model) > 200 {
-				return errors.New("服务商或模型配置无效")
-			}
-			input.Endpoint = strings.TrimRight(strings.TrimSpace(input.Endpoint), "/")
-			if err := validateEndpoint(input.Endpoint); err != nil {
+			config, err := normalizeServiceInput(name, input)
+			if err != nil {
 				return err
 			}
 			old := map[string]ServiceConfig{"asr": s.Settings.ASR, "llm": s.Settings.LLM, "tts": s.Settings.TTS, "external": s.Settings.External}[name]
@@ -220,7 +236,7 @@ func (p *Platform) saveSettings(in SettingsInput) error {
 			if input.ClearKey {
 				delete(s.Sealed, secretName)
 			}
-			if (input.Endpoint != old.Endpoint || input.Provider != old.Provider) && s.Sealed[secretName] != "" && input.APIKey == "" {
+			if (config.Endpoint != old.Endpoint || config.Provider != old.Provider) && s.Sealed[secretName] != "" && input.APIKey == "" {
 				return errors.New("更换服务商或地址时，请重新填写密钥，或勾选清除旧密钥")
 			}
 			if input.APIKey != "" {
@@ -230,7 +246,7 @@ func (p *Platform) saveSettings(in SettingsInput) error {
 				}
 				s.Sealed[secretName] = sealed
 			}
-			config := ServiceConfig{Provider: input.Provider, Endpoint: input.Endpoint, Model: strings.TrimSpace(input.Model), KeyConfigured: s.Sealed[secretName] != ""}
+			config.KeyConfigured = s.Sealed[secretName] != ""
 			switch name {
 			case "asr":
 				next.ASR = config
@@ -271,7 +287,17 @@ func (p *Platform) chat(ctx context.Context, message string) (string, error) {
 	return p.respond(ctx, p.snapshot(), message, true)
 }
 
+type replyOptions struct {
+	markTextSetup bool
+	transientKey  *string
+	draft         bool
+}
+
 func (p *Platform) respond(ctx context.Context, s State, message string, markTextSetup bool) (string, error) {
+	return p.requestReply(ctx, s, message, replyOptions{markTextSetup: markTextSetup})
+}
+
+func (p *Platform) requestReply(ctx context.Context, s State, message string, options replyOptions) (string, error) {
 	config := s.Settings.LLM
 	service := "llm"
 	useExternal := s.Settings.Mode == "external"
@@ -289,10 +315,10 @@ func (p *Platform) respond(ctx context.Context, s State, message string, markTex
 		service = "external"
 	}
 	if useExternal && config.Endpoint == "" {
-		return "", errors.New("请先保存外部助手的连接地址")
+		return "", errors.New("请填写外部助手的连接地址")
 	}
 	if !useExternal && (config.Endpoint == "" || config.Model == "") {
-		return "", errors.New("请先保存完整的服务地址与模型配置")
+		return "", errors.New("请填写服务地址和模型 ID")
 	}
 	endpoint := config.Endpoint
 	var payload any = map[string]string{"message": message}
@@ -312,7 +338,9 @@ func (p *Platform) respond(ctx context.Context, s State, message string, markTex
 		payload = params
 	}
 	var secret string
-	if sealed := s.Sealed["service:"+service]; sealed != "" {
+	if options.transientKey != nil {
+		secret = *options.transientKey
+	} else if sealed := s.Sealed["service:"+service]; sealed != "" {
 		var err error
 		secret, err = p.unseal("service:"+service, sealed)
 		if err != nil {
@@ -404,14 +432,16 @@ func (p *Platform) respond(ctx context.Context, s State, message string, markTex
 	}
 	usage.DurationMS = time.Since(start).Milliseconds()
 	usage.Success = usage.ErrorCode == ""
-	if err = p.change(func(s *State) error {
-		s.Usage = append(s.Usage, usage)
-		if markTextSetup && usage.Success && s.Settings.Revision == usage.ConfigRevision {
-			s.Settings.SetupComplete = true
+	if !options.draft {
+		if err = p.change(func(s *State) error {
+			s.Usage = append(s.Usage, usage)
+			if options.markTextSetup && usage.Success && s.Settings.Revision == usage.ConfigRevision {
+				s.Settings.SetupComplete = true
+			}
+			return nil
+		}); err != nil {
+			return "", errors.New("调用结束，但用量记录未能保存，请检查存储")
 		}
-		return nil
-	}); err != nil {
-		return "", errors.New("调用结束，但用量记录未能保存，请检查存储")
 	}
 	if !usage.Success {
 		return "", fmt.Errorf("服务调用失败（%s）；请检查地址、密钥、模型和服务额度", usage.ErrorCode)
@@ -511,23 +541,52 @@ func (a *api) settingsRoutes(m *http.ServeMux) {
 		writeJSON(w, 200, map[string]string{"reply": reply})
 	})
 	m.HandleFunc("POST /api/settings/verify", func(w http.ResponseWriter, r *http.Request) {
-		var in struct{ Service string }
+		var in struct {
+			Service string        `json:"service"`
+			Config  *ServiceInput `json:"config,omitempty"`
+		}
 		if err := decode(w, r, &in); err != nil {
 			bad(w, err)
 			return
 		}
 		s := a.platform.snapshot()
+		var selected *ServiceConfig
 		switch in.Service {
 		case "llm":
 			s.Settings.Mode = "direct"
+			selected = &s.Settings.LLM
 		case "external":
 			s.Settings.Mode = "external"
+			selected = &s.Settings.External
 		default:
 			bad(w, errors.New("未知验证服务"))
 			return
 		}
+		options := replyOptions{markTextSetup: true}
+		if in.Config != nil {
+			current := *selected
+			candidate, err := normalizeServiceInput(in.Service, *in.Config)
+			if err != nil {
+				bad(w, err)
+				return
+			}
+			key := in.Config.APIKey
+			if key != "" {
+				if err := validateServiceKey(key); err != nil {
+					bad(w, err)
+					return
+				}
+			}
+			sameTarget := candidate.Provider == current.Provider && candidate.Endpoint == current.Endpoint
+			if key != "" || in.Config.ClearKey || !sameTarget {
+				options.transientKey = &key
+			}
+			candidate.KeyConfigured = key != "" || (options.transientKey == nil && current.KeyConfigured)
+			options.draft = candidate != current || options.transientKey != nil
+			*selected = candidate
+		}
 		start := time.Now()
-		if _, err := a.platform.respond(r.Context(), s, "这是连接验证，请只回复 OK。", true); err != nil {
+		if _, err := a.platform.requestReply(r.Context(), s, "这是连接验证，请只回复 OK。", options); err != nil {
 			bad(w, err)
 			return
 		}

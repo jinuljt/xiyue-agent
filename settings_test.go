@@ -284,3 +284,60 @@ func TestServiceHealthReportsOnlyCurrentConfigurationResults(t *testing.T) {
 		t.Fatalf("unexpected new revision status: %+v", got)
 	}
 }
+
+func TestVerifyUsesUnsavedConfigWithoutPersistingOrForwardingOldKeys(t *testing.T) {
+	type observed struct{ Model, Auth string }
+	calls := make(chan observed, 4)
+	gateway := func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var in struct{ Model string }
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				http.Error(w, "invalid payload", 400)
+				return
+			}
+			calls <- observed{Model: in.Model, Auth: r.Header.Get("Authorization")}
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"OK"}}]}`)
+		}))
+	}
+	original, other := gateway(), gateway()
+	defer original.Close()
+	defer other.Close()
+	path := filepath.Join(t.TempDir(), "state.json")
+	p, err := openPlatform(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := settingsInput(p.snapshot().Settings)
+	in.LLM = ServiceInput{Provider: "custom", Endpoint: original.URL, Model: "saved-model", APIKey: "fixture-old-key"}
+	if err := p.saveSettings(in); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := (&api{platform: p}).routes()
+	test := func(config ServiceInput, auth string) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"service": "llm", "config": config})
+		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8765/api/settings/verify", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Xiyue-Request", "console")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Fatalf("verify failed with %d: %s", w.Code, w.Body.String())
+		}
+		if call := <-calls; call.Model != config.Model || call.Auth != auth {
+			t.Fatal("verification used the wrong model or credentials")
+		}
+	}
+	test(ServiceInput{Provider: "custom", Endpoint: other.URL, Model: "different-model"}, "")
+	test(ServiceInput{Provider: "custom", Endpoint: other.URL, Model: "draft-model", APIKey: "fixture-draft-key"}, "Bearer fixture-draft-key")
+	test(ServiceInput{Provider: "custom", Endpoint: original.URL + "/", Model: "unsaved-model"}, "Bearer fixture-old-key")
+	test(ServiceInput{Provider: "custom", Endpoint: original.URL, Model: "no-key-model", ClearKey: true}, "")
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(before) {
+		t.Fatal("draft verification persisted changes")
+	}
+}
