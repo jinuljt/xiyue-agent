@@ -336,11 +336,11 @@ func (a *api) guard(next http.Handler) http.Handler {
 				http.NotFound(w, r)
 				return
 			case r.Method == http.MethodGet && r.URL.Path == "/api/session":
-			case r.Method == http.MethodPost && (r.URL.Path == "/api/session/pair" || r.URL.Path == "/api/session/login" ||
+			case r.Method == http.MethodPost && (r.URL.Path == "/api/session/login" ||
 				r.URL.Path == "/api/session/device" || r.URL.Path == "/api/session/device/claim"):
 			case r.Method == http.MethodDelete && r.URL.Path == "/api/session/device":
 			case !a.platform.authenticated(r):
-				writeJSON(w, 401, map[string]string{"error": "请先配对并登录音箱"})
+				writeJSON(w, 401, map[string]string{"error": "请先登录音箱"})
 				return
 			}
 		}
@@ -361,14 +361,14 @@ func main() {
 	adminHost := flag.String("admin-host", "", "管理 HTTPS 地址中的主机和端口")
 	tlsCert := flag.String("admin-tls-cert", "", "受手机信任的 HTTPS 证书路径")
 	tlsKey := flag.String("admin-tls-key", "", "HTTPS 私钥路径")
-	pairFile := flag.String("admin-pairing-file", "", "仅本机所有者可读写的配对或恢复码文件")
-	newAdminCode := flag.Bool("new-admin-code", false, "只为指定的管理码文件生成一次性设置或恢复码")
+	installSocket := flag.String("admin-install-socket", "", "仅设备本机安装器可访问的管理员设置套接字")
+	provisionAdmin := flag.Bool("provision-admin", false, "从标准输入读取管理员信息并交给运行中的安装入口")
 	buttonInput := flag.String("admin-button-device", "", "音箱确认按键的 Linux evdev 路径")
 	buttonKey := flag.Uint("admin-button-key", 0, "已验证用于登录的实体键 EV_KEY 编号")
 	buttonLabel := flag.String("admin-button-label", "", "控制台显示的实体按键名称")
 	flag.Parse()
-	if *newAdminCode {
-		if err := writeAdminCode(*pairFile); err != nil {
+	if *provisionAdmin {
+		if err := sendOwnerSetup(*installSocket, os.Stdin); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -402,12 +402,12 @@ func main() {
 		log.Fatal("监听地址无效")
 	}
 	var admin *adminGate
-	if *adminHost != "" || *tlsCert != "" || *tlsKey != "" || *pairFile != "" {
+	if *adminHost != "" || *tlsCert != "" || *tlsKey != "" || *installSocket != "" {
 		name, e := url.Parse("https://" + *adminHost)
-		if *tlsCert == "" || *tlsKey == "" || *pairFile == "" || e != nil || name.Host != *adminHost || name.Hostname() == "" || name.User != nil {
-			log.Fatal("配对模式需要明确的管理主机、HTTPS 证书、私钥和配对码文件")
+		if *tlsCert == "" || *tlsKey == "" || e != nil || name.Host != *adminHost || name.Hostname() == "" || name.User != nil {
+			log.Fatal("局域网管理需要明确的管理主机、HTTPS 证书和私钥")
 		}
-		admin = &adminGate{host: *adminHost, codePath: *pairFile}
+		admin = &adminGate{host: *adminHost}
 	} else if host != "127.0.0.1" && host != "::1" {
 		log.Fatal("非回环监听必须启用 HTTPS 配对")
 	}
@@ -466,6 +466,14 @@ func main() {
 		}
 		go p.serveDeliveries(ctx, voice)
 	}
+	if *installSocket != "" {
+		sock, err := openPrivateSocket(*installSocket)
+		if err != nil {
+			log.Fatal("无法打开本机安装入口: ", err)
+		}
+		defer sock.Close()
+		go p.serveOwnerSetup(ctx, sock)
+	}
 	if *buttonInput != "" || *buttonKey != 0 || *buttonLabel != "" {
 		if admin == nil || runtime.GOOS != "linux" || !filepath.IsAbs(*buttonInput) ||
 			*buttonKey == 0 || *buttonKey > 767 || strings.TrimSpace(*buttonLabel) == "" {
@@ -496,7 +504,7 @@ func main() {
 		if e != nil {
 			log.Fatal("未找到 OH2P 录音命令")
 		}
-		wakes, e := openWakeSocket(*wakeSocket)
+		wakes, e := openPrivateSocket(*wakeSocket)
 		if e != nil {
 			log.Fatalf("无法启动 OH2P 唤醒套接字: %v", e)
 		}

@@ -123,9 +123,9 @@ func oh2pListeningLED(on bool) {
 	_ = exec.CommandContext(ctx, program, "3").Run()
 }
 
-func openWakeSocket(path string) (*net.UnixListener, error) {
+func openPrivateSocket(path string) (*net.UnixListener, error) {
 	if !filepath.IsAbs(path) {
-		return nil, errors.New("唤醒套接字必须使用绝对路径")
+		return nil, errors.New("本机套接字必须使用绝对路径")
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -133,7 +133,7 @@ func openWakeSocket(path string) (*net.UnixListener, error) {
 	}
 	info, err := os.Stat(dir)
 	if err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
-		return nil, errors.New("唤醒套接字应位于权限为 0700 的目录")
+		return nil, errors.New("本机套接字应位于权限为 0700 的目录")
 	}
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {

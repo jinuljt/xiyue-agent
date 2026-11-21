@@ -8,10 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
-	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -24,14 +21,12 @@ type ownerState struct {
 	Username      string    `json:"username,omitempty"`
 	PasswordSalt  []byte    `json:"password_salt,omitempty"`
 	PasswordHash  []byte    `json:"password_hash,omitempty"`
-	PairingDigest string    `json:"pairing_digest"`
 	SessionDigest string    `json:"session_digest"`
 	ExpiresAt     time.Time `json:"expires_at"`
 }
 
 type adminGate struct {
 	host            string
-	codePath        string
 	mu              sync.Mutex
 	lastAttempt     time.Time
 	lastDeviceStart time.Time
@@ -45,51 +40,6 @@ type adminGate struct {
 func digest(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
-}
-
-func readAdminCode(path string) (string, time.Time, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > 256 {
-		return "", time.Time{}, errors.New("恢复码文件不符合权限或格式要求")
-	}
-	raw := make([]byte, info.Size())
-	if _, err = io.ReadFull(f, raw); err != nil {
-		return "", time.Time{}, err
-	}
-	code := strings.TrimSpace(string(raw))
-	if len(code) < 32 || strings.ContainsAny(code, " \t\r\n") {
-		return "", time.Time{}, errors.New("恢复码文件格式无效")
-	}
-	return digest(code), info.ModTime().Add(15 * time.Minute), nil
-}
-
-func writeAdminCode(path string) error {
-	if !filepath.IsAbs(path) {
-		return errors.New("恢复码文件需要绝对路径")
-	}
-	info, err := os.Stat(filepath.Dir(path))
-	if err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
-		return errors.New("请将恢复码放在仅所有者可访问的目录")
-	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".admin-code-")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	_, err = f.WriteString(rand.Text() + rand.Text() + "\n")
-	closeErr := f.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	return os.Rename(f.Name(), path)
 }
 
 func passwordHash(password string, salt []byte) ([]byte, error) {
@@ -114,10 +64,16 @@ func ownerCookie(value string, expires time.Time) *http.Cookie {
 type ownerRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
-	Code     string `json:"code,omitempty"`
 }
 
-func (a *api) authenticateOwner(w http.ResponseWriter, r *http.Request, useCode bool) {
+func (r *ownerRequest) valid() bool {
+	r.Username = strings.TrimSpace(r.Username)
+	return r.Username != "" && len(r.Username) <= 64 &&
+		!strings.ContainsFunc(r.Username, func(c rune) bool { return unicode.IsSpace(c) || unicode.IsControl(c) }) &&
+		len(r.Password) <= 256
+}
+
+func (a *api) authenticateOwner(w http.ResponseWriter, r *http.Request) {
 	g := a.admin
 	if g == nil {
 		http.NotFound(w, r)
@@ -132,15 +88,8 @@ func (a *api) authenticateOwner(w http.ResponseWriter, r *http.Request, useCode 
 		bad(w, err)
 		return
 	}
-	request.Username = strings.TrimSpace(request.Username)
-	if request.Username == "" || len(request.Username) > 64 ||
-		strings.ContainsFunc(request.Username, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) ||
-		len(request.Password) > 256 {
+	if !request.valid() {
 		bad(w, errors.New("请输入有效的管理员用户名和密码"))
-		return
-	}
-	if useCode && len([]rune(request.Password)) < 12 {
-		bad(w, errors.New("请使用至少 12 个字符的密码"))
 		return
 	}
 	now := time.Now()
@@ -152,38 +101,16 @@ func (a *api) authenticateOwner(w http.ResponseWriter, r *http.Request, useCode 
 	}
 	g.lastAttempt = now
 	current := a.platform.snapshot().Owner
-	var owner ownerState
-	if useCode {
-		code, expires, err := readAdminCode(g.codePath)
-		if err != nil || !now.Before(expires) || len(request.Code) > 256 ||
-			subtle.ConstantTimeCompare([]byte(digest(strings.TrimSpace(request.Code))), []byte(code)) != 1 ||
-			(current != nil && current.PairingDigest == code) {
-			writeJSON(w, 401, map[string]string{"error": "设置或恢复码无效、已过期或已使用"})
-			return
-		}
-		owner = ownerState{Username: request.Username, PairingDigest: code, PasswordSalt: make([]byte, 16)}
-		if _, err := rand.Read(owner.PasswordSalt); err != nil {
-			http.Error(w, "无法设置管理员", 500)
-			return
-		}
-		owner.PasswordHash, err = passwordHash(request.Password, owner.PasswordSalt)
-		if err != nil {
-			http.Error(w, "无法设置管理员", 500)
-			return
-		}
-	} else {
-		if current == nil || len(current.PasswordSalt) != 16 || len(current.PasswordHash) != 32 {
-			writeJSON(w, 401, map[string]string{"error": "请先设置管理员"})
-			return
-		}
-		candidate, err := passwordHash(request.Password, current.PasswordSalt)
-		if err != nil || subtle.ConstantTimeCompare(candidate, current.PasswordHash) != 1 || request.Username != current.Username {
-			writeJSON(w, 401, map[string]string{"error": "用户名或密码不正确"})
-			return
-		}
-		owner = *current
+	if current == nil || len(current.PasswordSalt) != 16 || len(current.PasswordHash) != 32 {
+		writeJSON(w, 409, map[string]string{"error": "请在安装向导中设置管理员"})
+		return
 	}
-	if err := a.issueOwnerSession(w, owner, ""); err != nil {
+	candidate, err := passwordHash(request.Password, current.PasswordSalt)
+	if err != nil || subtle.ConstantTimeCompare(candidate, current.PasswordHash) != 1 || request.Username != current.Username {
+		writeJSON(w, 401, map[string]string{"error": "用户名或密码不正确"})
+		return
+	}
+	if err := a.issueOwnerSession(w, *current, ""); err != nil {
 		bad(w, err)
 		return
 	}
@@ -279,12 +206,7 @@ func (a *api) adminRoutes(m *http.ServeMux) {
 	m.HandleFunc("POST /api/session/device/claim", a.deviceLoginAction)
 	m.HandleFunc("DELETE /api/session/device", a.deviceLoginAction)
 	m.HandleFunc("POST /api/session/password", a.changeOwnerPassword)
-	m.HandleFunc("POST /api/session/pair", func(w http.ResponseWriter, r *http.Request) {
-		a.authenticateOwner(w, r, true)
-	})
-	m.HandleFunc("POST /api/session/login", func(w http.ResponseWriter, r *http.Request) {
-		a.authenticateOwner(w, r, false)
-	})
+	m.HandleFunc("POST /api/session/login", a.authenticateOwner)
 	m.HandleFunc("POST /api/session/logout", func(w http.ResponseWriter, r *http.Request) {
 		if a.admin == nil {
 			http.NotFound(w, r)
