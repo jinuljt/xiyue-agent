@@ -12,14 +12,14 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 )
 
-func TestDoubaoSentenceRecognitionOverWebSocket(t *testing.T) {
-	wav := append(fixtureWAV(), make([]byte, 12000)...)
-	binary.LittleEndian.PutUint32(wav[4:], uint32(len(wav)-8))
-	binary.LittleEndian.PutUint32(wav[40:], uint32(len(wav)-44))
+func TestDoubaoStreamsBeforeCaptureEnds(t *testing.T) {
+	pcm := bytes.Repeat([]byte{0x10, 0x80}, doubaoPacketBytes/2+200)
+	firstAudioReceived := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := r.Header.Get("X-Api-Request-Id")
 		if r.Header.Get("X-Api-Key") != "synthetic-key" || r.Header.Get("X-Api-Resource-Id") != doubaoASRResource ||
@@ -63,16 +63,19 @@ func TestDoubaoSentenceRecognitionOverWebSocket(t *testing.T) {
 						Model string `json:"model_name"`
 					}
 				}
-				if err := json.Unmarshal(data, &config); err != nil || config.Audio.Format != "wav" ||
+				if err := json.Unmarshal(data, &config); err != nil || config.Audio.Format != "pcm" ||
 					config.Audio.Rate != 16000 || config.Request.Model != "bigmodel" {
 					t.Error("unexpected speech configuration")
 					return
 				}
 			} else {
 				audio = append(audio, data...)
+				if index == 1 {
+					close(firstAudioReceived)
+				}
 			}
 		}
-		if !bytes.Equal(audio, wav) {
+		if !bytes.Equal(audio, pcm) {
 			t.Error("speech payload changed")
 			return
 		}
@@ -90,7 +93,19 @@ func TestDoubaoSentenceRecognitionOverWebSocket(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	reply, err := recognizeDoubao(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), doubaoASRResource, "synthetic-key", wav)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	reply, err := recognizeDoubao(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), doubaoASRResource, "synthetic-key", func(ctx context.Context, emit func([]byte) error) error {
+		if err := emit(pcm); err != nil {
+			return err
+		}
+		select {
+		case <-firstAudioReceived:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
 	if err != nil || reply != "合成的识别结果" {
 		t.Fatalf("unexpected result: %q, %v", reply, err)
 	}
@@ -111,8 +126,25 @@ func TestDoubaoRejectsBadFramesAndRedirects(t *testing.T) {
 		http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
 	}))
 	defer server.Close()
-	if _, err := recognizeDoubao(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), doubaoASRResource, "synthetic-key", nil); err == nil ||
+	if _, err := recognizeDoubao(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), doubaoASRResource, "synthetic-key", func(context.Context, func([]byte) error) error { return nil }); err == nil ||
 		strings.Contains(err.Error(), "synthetic-key") {
 		t.Fatal("redirect should fail without revealing the credential")
+	}
+}
+
+func TestDoubaoHandshakeReportsPermissionWithoutEchoingCredentials(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Tt-Logid", "example-log-id")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"resource not granted to synthetic-key"}`)
+	}))
+	defer server.Close()
+	_, err := recognizeDoubao(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), doubaoASRResource, "synthetic-key", func(ctx context.Context, _ func([]byte) error) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	if err == nil || !strings.Contains(err.Error(), "未获所选识别资源") || !strings.Contains(err.Error(), "example-log-id") ||
+		strings.Contains(err.Error(), "synthetic-key") {
+		t.Fatalf("unexpected handshake error: %v", err)
 	}
 }

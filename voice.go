@@ -34,6 +34,8 @@ type voiceRuntime struct {
 	last         *voiceResult
 }
 
+type voiceCapture func(context.Context, func([]byte) error) ([]byte, error)
+
 type voiceResult struct {
 	modelUsed  bool
 	CaptureMS  int64  `json:"capture_ms,omitempty"`
@@ -55,43 +57,51 @@ func (v *voiceRuntime) status() any {
 
 // Accept only finished clips from the device's 16 kHz mono PCM capture boundary.
 func validVoiceWAV(data []byte) bool {
+	return voiceWAVPCM(data) != nil
+}
+
+func voiceWAVPCM(data []byte) []byte {
 	if len(data) < 44 || len(data) > maxVoiceWAV || string(data[:4]) != "RIFF" ||
 		string(data[8:12]) != "WAVE" || uint64(binary.LittleEndian.Uint32(data[4:8]))+8 != uint64(len(data)) {
-		return false
+		return nil
 	}
-	var formatOK, audioOK bool
+	var formatOK bool
+	var pcm []byte
 	for offset := 12; offset < len(data); {
 		if len(data)-offset < 8 {
-			return false
+			return nil
 		}
 		chunk := data[offset:]
 		size := uint64(binary.LittleEndian.Uint32(chunk[4:8]))
 		padded := size + size%2
 		if padded > uint64(len(chunk)-8) {
-			return false
+			return nil
 		}
 		body := chunk[8 : 8+int(size)]
 		switch string(chunk[:4]) {
 		case "fmt ":
 			if formatOK || len(body) < 16 {
-				return false
+				return nil
 			}
 			formatOK = binary.LittleEndian.Uint16(body) == 1 &&
 				binary.LittleEndian.Uint16(body[2:]) == 1 && binary.LittleEndian.Uint32(body[4:]) == 16000 &&
 				binary.LittleEndian.Uint32(body[8:]) == 32000 && binary.LittleEndian.Uint16(body[12:]) == 2 &&
 				binary.LittleEndian.Uint16(body[14:]) == 16
 			if !formatOK {
-				return false
+				return nil
 			}
 		case "data":
-			if audioOK || size == 0 || size%2 != 0 || size > 16000*2*30 {
-				return false
+			if pcm != nil || size == 0 || size%2 != 0 || size > 16000*2*30 {
+				return nil
 			}
-			audioOK = true
+			pcm = body
 		}
 		offset += 8 + int(padded)
 	}
-	return formatOK && audioOK
+	if !formatOK {
+		return nil
+	}
+	return pcm
 }
 
 func asrReady(asr ServiceConfig) bool {
@@ -99,19 +109,41 @@ func asrReady(asr ServiceConfig) bool {
 		(asr.Provider == "doubao" && asr.Endpoint == "" && asr.KeyConfigured)
 }
 
-func (p *Platform) transcribe(ctx context.Context, s State, wav []byte) (string, error) {
-	return p.transcribeWithKey(ctx, s, wav, nil)
-}
-
-func (p *Platform) transcribeWithKey(ctx context.Context, s State, wav []byte, temporary *string) (string, error) {
+func (p *Platform) captureAndTranscribe(ctx context.Context, s State, capture voiceCapture, temporary *string, result *voiceResult) (string, error) {
 	cfg := s.Settings.ASR
 	key, err := p.serviceKey(s, "asr", temporary)
 	if err != nil {
 		return "", err
 	}
+	start := time.Now()
 	if cfg.Provider == "doubao" {
-		return transcribeDoubao(ctx, cfg, key, wav)
+		var captureTime time.Duration
+		text, err := transcribeDoubao(ctx, cfg, key, func(ctx context.Context, emit func([]byte) error) error {
+			_, err := capture(ctx, emit)
+			captureTime = time.Since(start)
+			return err
+		})
+		result.CaptureMS = captureTime.Milliseconds()
+		result.Stage = "asr"
+		result.ASRMS = (time.Since(start) - captureTime).Milliseconds()
+		return text, err
 	}
+	wav, err := capture(ctx, nil)
+	result.CaptureMS = time.Since(start).Milliseconds()
+	if err != nil {
+		return "", err
+	}
+	if !validVoiceWAV(wav) {
+		return "", errors.New("音箱没有收到可识别的录音")
+	}
+	result.Stage = "asr"
+	start = time.Now()
+	text, err := transcribeSenseVoice(ctx, cfg, key, wav)
+	result.ASRMS = time.Since(start).Milliseconds()
+	return text, err
+}
+
+func transcribeSenseVoice(ctx context.Context, cfg ServiceConfig, key string, wav []byte) (string, error) {
 	if cfg.Provider != "sensevoice" || cfg.Endpoint == "" {
 		return "", errors.New("请先配置 FunASR SenseVoice 服务地址")
 	}
@@ -216,11 +248,17 @@ func (a *api) voiceRoutes(m *http.ServeMux) {
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxVoiceWAV)
 		wav, err := io.ReadAll(r.Body)
-		if err != nil || !validVoiceWAV(wav) {
+		pcm := voiceWAVPCM(wav)
+		if err != nil || pcm == nil {
 			bad(w, errors.New("需要不超过 30 秒的 16 kHz 单声道 16 位 PCM WAV"))
 			return
 		}
-		result, err := a.platform.runVoiceTurn(r.Context(), v, func(context.Context) ([]byte, error) { return wav, nil }, nil)
+		result, err := a.platform.runVoiceTurn(r.Context(), v, func(_ context.Context, emit func([]byte) error) ([]byte, error) {
+			if emit != nil {
+				return nil, emit(pcm)
+			}
+			return wav, nil
+		}, nil)
 		if errors.Is(err, errVoiceBusy) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		} else if err != nil {
@@ -240,7 +278,7 @@ func (v *voiceRuntime) stopTurn() {
 		v.cancel()
 	}
 }
-func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture func(context.Context) ([]byte, error), captureLED func(bool)) (result voiceResult, err error) {
+func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture voiceCapture, captureLED func(bool)) (result voiceResult, err error) {
 	v.mu.Lock()
 	if v.active {
 		v.mu.Unlock()
@@ -270,22 +308,13 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 		return result, errors.New("请先配置自建 SenseVoice 或豆包语音识别")
 	}
 	result.Stage = "capture"
-	start := time.Now()
-	if captureLED != nil {
-		captureLED(true)
-	}
-	wav, err := capture(ctx)
-	if captureLED != nil {
-		captureLED(false)
-	}
-	result.CaptureMS = time.Since(start).Milliseconds()
-	if err != nil {
-		return result, err
-	}
-	result.Stage = "asr"
-	start = time.Now()
-	text, err := p.transcribe(ctx, s, wav)
-	result.ASRMS = time.Since(start).Milliseconds()
+	text, err := p.captureAndTranscribe(ctx, s, func(ctx context.Context, emit func([]byte) error) ([]byte, error) {
+		if captureLED != nil {
+			captureLED(true)
+			defer captureLED(false)
+		}
+		return capture(ctx, emit)
+	}, nil, &result)
 	if err != nil {
 		return result, err
 	}
@@ -305,7 +334,7 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 	if !handled {
 		result.modelUsed = true
 		result.Stage = "model"
-		start = time.Now()
+		start := time.Now()
 		reply, err = p.respond(ctx, s, text, false)
 		result.ModelMS = time.Since(start).Milliseconds()
 		if err != nil {
@@ -313,7 +342,7 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 		}
 	}
 	result.Stage = "playback"
-	start = time.Now()
+	start := time.Now()
 	err = p.playConfiguredSpeech(ctx, v, s, reply)
 	result.PlaybackMS = time.Since(start).Milliseconds()
 	if err != nil {

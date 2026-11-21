@@ -40,7 +40,7 @@ func TestSpeechVerificationUsesDraftConfigurationAndSpeaker(t *testing.T) {
 	var captures int
 	var spoken string
 	v := &voiceRuntime{speak: func(_ context.Context, text string) error { spoken = text; return nil }}
-	h := (&api{platform: p, speechProbe: v, probeCapture: func(context.Context) ([]byte, error) {
+	h := (&api{platform: p, speechProbe: v, probeCapture: func(context.Context, func([]byte) error) ([]byte, error) {
 		captures++
 		return fixtureWAV(), nil
 	}}).routes()

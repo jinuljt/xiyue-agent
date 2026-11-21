@@ -20,7 +20,7 @@ const (
 	captureLimitFrames  = 600
 )
 
-func captureOH2P(ctx context.Context, arecord string, threshold float64) ([]byte, error) {
+func captureOH2P(ctx context.Context, arecord string, threshold float64, emit func([]byte) error) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 14*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, arecord, "--quiet", "-D", "noop", "-t", "raw", "-f", "S32_LE", "-r", "16000", "-c", "4", "-d", "12")
@@ -32,7 +32,7 @@ func captureOH2P(ctx context.Context, arecord string, threshold float64) ([]byte
 		return nil, errors.New("无法启动音箱录音")
 	}
 	stopReading := context.AfterFunc(ctx, func() { _ = out.Close() })
-	wav, captureErr := readOH2PClip(out, threshold)
+	wav, captureErr := readOH2PClip(out, threshold, emit)
 	waitErr := cmd.Process.Kill()
 	_ = cmd.Wait() // Early end-of-speech intentionally terminates arecord.
 	stopReading()
@@ -48,10 +48,10 @@ func captureOH2P(ctx context.Context, arecord string, threshold float64) ([]byte
 	return wav, nil
 }
 
-func readOH2PClip(src io.Reader, threshold float64) ([]byte, error) {
+func readOH2PClip(src io.Reader, threshold float64, emit func([]byte) error) ([]byte, error) {
 	var frame [captureFrameSamples * 4 * 4]byte
 	// Keep up to 200 ms before speech onset, and use only the first microphone.
-	audio := make([]int32, 0, captureLimitFrames*captureFrameSamples)
+	audio := make([]int32, 0, captureFrameSamples*18)
 	loud, quiet := 0, 0
 	for n := 0; n < captureLimitFrames; n++ {
 		if _, err := io.ReadFull(src, frame[:]); err != nil {
@@ -76,6 +76,21 @@ func readOH2PClip(src io.Reader, threshold float64) ([]byte, error) {
 		} else if loud > 0 {
 			quiet++
 		}
+		if emit != nil && loud >= 8 {
+			var pcm [captureFrameSamples * 2]byte
+			for offset := 0; offset < len(audio); offset += captureFrameSamples {
+				samples := audio[offset:min(len(audio), offset+captureFrameSamples)]
+				for i, sample := range samples {
+					// Fixed gain keeps the level consistent without waiting for the clip peak.
+					value := min(32767, max(-32768, sample>>9))
+					binary.LittleEndian.PutUint16(pcm[i*2:], uint16(int16(value)))
+				}
+				if err := emit(pcm[:len(samples)*2]); err != nil {
+					return nil, err
+				}
+			}
+			audio = audio[:0]
+		}
 		if loud >= 8 && quiet >= 28 {
 			break
 		}
@@ -86,6 +101,9 @@ func readOH2PClip(src io.Reader, threshold float64) ([]byte, error) {
 	}
 	if loud < 8 {
 		return nil, errors.New("未检测到足够的说话声")
+	}
+	if emit != nil {
+		return nil, nil
 	}
 	var peak float64
 	for _, sample := range audio {
@@ -146,7 +164,7 @@ func openPrivateSocket(path string) (*net.UnixListener, error) {
 	return listener, nil
 }
 
-func (p *Platform) serveWakeSocket(ctx context.Context, listener net.Listener, v *voiceRuntime, capture func(context.Context) ([]byte, error), setLED func(bool)) {
+func (p *Platform) serveWakeSocket(ctx context.Context, listener net.Listener, v *voiceRuntime, capture voiceCapture, setLED func(bool)) {
 	stop := context.AfterFunc(ctx, func() { _ = listener.Close() })
 	defer stop()
 	for {

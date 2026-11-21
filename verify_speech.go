@@ -46,15 +46,7 @@ func (a *api) verifySpeech(w http.ResponseWriter, r *http.Request, s State, serv
 	start := time.Now()
 	result := map[string]any{"ok": true}
 	if service == "asr" {
-		wav, err := a.probeCapture(ctx)
-		if err == nil && !validVoiceWAV(wav) {
-			err = errors.New("音箱没有收到可识别的录音")
-		}
-		if err != nil {
-			bad(w, err)
-			return
-		}
-		text, err := a.platform.transcribeWithKey(ctx, s, wav, temporary)
+		text, err := a.platform.captureAndTranscribe(ctx, s, a.probeCapture, temporary, &voiceResult{})
 		if err != nil {
 			bad(w, err)
 			return

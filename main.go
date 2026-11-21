@@ -29,7 +29,7 @@ type api struct {
 	assets                      map[string][]byte
 	voice                       *voiceRuntime
 	speechProbe                 *voiceRuntime
-	probeCapture                func(context.Context) ([]byte, error)
+	probeCapture                voiceCapture
 	admin                       *adminGate
 }
 
@@ -405,7 +405,7 @@ func main() {
 		return
 	}
 	var voice, speaker *voiceRuntime
-	var probeCapture func(context.Context) ([]byte, error)
+	var probeCapture voiceCapture
 	oh2p := strings.EqualFold(*deviceModel, "OH2P")
 	if *systemVoice || oh2p {
 		speaker = &voiceRuntime{}
@@ -426,7 +426,9 @@ func main() {
 		}
 		if oh2p {
 			if arecord, err := exec.LookPath("arecord"); err == nil && *vad > 0 && !math.IsInf(*vad, 0) {
-				probeCapture = func(ctx context.Context) ([]byte, error) { return captureOH2P(ctx, arecord, *vad) }
+				probeCapture = func(ctx context.Context, emit func([]byte) error) ([]byte, error) {
+					return captureOH2P(ctx, arecord, *vad, emit)
+				}
 			}
 		}
 	}
@@ -554,7 +556,9 @@ func main() {
 			voice.confirmLogin = admin.confirmVoiceLogin
 			captureLED = admin.captureLED
 		}
-		go p.serveWakeSocket(ctx, wakes, voice, func(ctx context.Context) ([]byte, error) { return captureOH2P(ctx, arecord, *vad) }, captureLED)
+		go p.serveWakeSocket(ctx, wakes, voice, func(ctx context.Context, emit func([]byte) error) ([]byte, error) {
+			return captureOH2P(ctx, arecord, *vad, emit)
+		}, captureLED)
 	}
 	go func() {
 		ticker := time.NewTicker(time.Second)
