@@ -335,7 +335,7 @@ func (a *api) guard(next http.Handler) http.Handler {
 				http.NotFound(w, r)
 				return
 			case r.Method == http.MethodGet && r.URL.Path == "/api/session":
-			case r.Method == http.MethodPost && r.URL.Path == "/api/session/pair":
+			case r.Method == http.MethodPost && (r.URL.Path == "/api/session/pair" || r.URL.Path == "/api/session/login"):
 			case !a.platform.authenticated(r):
 				writeJSON(w, 401, map[string]string{"error": "请先配对并登录音箱"})
 				return
@@ -358,8 +358,15 @@ func main() {
 	adminHost := flag.String("admin-host", "", "管理 HTTPS 地址中的主机和端口")
 	tlsCert := flag.String("admin-tls-cert", "", "受手机信任的 HTTPS 证书路径")
 	tlsKey := flag.String("admin-tls-key", "", "HTTPS 私钥路径")
-	pairFile := flag.String("admin-pairing-file", "", "仅本机所有者可读写的配对码文件")
+	pairFile := flag.String("admin-pairing-file", "", "仅本机所有者可读写的配对或恢复码文件")
+	newAdminCode := flag.Bool("new-admin-code", false, "只为指定的管理码文件生成一次性设置或恢复码")
 	flag.Parse()
+	if *newAdminCode {
+		if err := writeAdminCode(*pairFile); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if *notifyWake != "" || *cancelVoice {
 		if *wakeSocket == "" || (*notifyWake != "" && *cancelVoice) || strings.ContainsAny(*notifyWake, "\r\n") {
 			log.Fatal("请指定一个本地语音动作及唤醒套接字")
@@ -394,10 +401,7 @@ func main() {
 		if *tlsCert == "" || *tlsKey == "" || *pairFile == "" || e != nil || name.Host != *adminHost || name.Hostname() == "" || name.User != nil {
 			log.Fatal("配对模式需要明确的管理主机、HTTPS 证书、私钥和配对码文件")
 		}
-		admin, err = readAdminPairing(*adminHost, *pairFile)
-		if err != nil {
-			log.Fatal(err)
-		}
+		admin = &adminGate{host: *adminHost, codePath: *pairFile}
 	} else if host != "127.0.0.1" && host != "::1" {
 		log.Fatal("非回环监听必须启用 HTTPS 配对")
 	}
