@@ -45,8 +45,16 @@ func (p *Platform) playSpeechWithKey(ctx context.Context, v *voiceRuntime, s Sta
 	if !ttsReady(v, s) {
 		return errors.New("请配置系统语音或可用的豆包语音合成服务")
 	}
+	ctx, finish, err := v.startPlayback(ctx)
+	if err != nil {
+		return err
+	}
+	defer finish()
 	if s.Settings.TTS.Provider == "system" {
-		return v.speak(ctx, text)
+		if err = v.speak(ctx, text); ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
 	}
 	key, err := p.serviceKey(s, "tts", temporary)
 	if err != nil {
@@ -54,6 +62,9 @@ func (p *Platform) playSpeechWithKey(ctx context.Context, v *voiceRuntime, s Sta
 	}
 	start := time.Now()
 	err = doubaoSpeech(ctx, doubaoTTSEndpoint, s.Settings.TTS.Model, key, text, v.playPCM)
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
 	if size := len(strings.TrimSpace(text)); size > 0 && size <= 4096 {
 		count := int64(utf8.RuneCountInString(strings.TrimSpace(text)))
 		u := UsageRecord{ID: newID(), Service: "tts", Provider: s.Settings.TTS.Provider, Model: s.Settings.TTS.Model, At: start.UTC(),

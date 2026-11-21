@@ -44,34 +44,81 @@ type voiceTaskReply struct {
 	text    string
 	handled bool
 	timer   bool
+	taskID  string
+}
+
+func currentQuestion(s State, task Task) *Event {
+	if task.Status != "waiting" || task.Index >= len(task.Steps) || task.Steps[task.Index].Kind != "ask" {
+		return nil
+	}
+	for i := len(s.Events) - 1; i >= 0; i-- {
+		event := &s.Events[i]
+		if event.TaskID == task.ID && event.StepIndex != nil && *event.StepIndex == task.Index {
+			return event
+		}
+	}
+	return nil
+}
+
+func activeQuestion(s State, now time.Time) *Event {
+	var active *Event
+	for _, task := range s.Tasks {
+		if event := currentQuestion(s, task); event != nil && event.Delivery == "delivered" && now.Sub(event.At) <= deliveryMaxAge {
+			if active != nil {
+				return nil
+			}
+			active = event
+		}
+	}
+	return active
+}
+
+func (p *Platform) confirmQuestion(question Event, now time.Time) (voiceTaskReply, error) {
+	reply := voiceTaskReply{text: "这个问题已变更，请先重新播放当前步骤。", handled: true}
+	err := p.change(func(s *State) error {
+		current := activeQuestion(*s, now)
+		if current == nil || current.ID != question.ID {
+			return errNoVoiceChange
+		}
+		reply.text, reply.taskID = "继续。", current.TaskID
+		return taskAction(s, current.TaskID, "confirm", now)
+	})
+	if errors.Is(err, errNoVoiceChange) {
+		err = nil
+	}
+	if err != nil {
+		return voiceTaskReply{text: "这次没执行成功，请稍后再试。", handled: true}, err
+	}
+	return reply, nil
 }
 
 func (p *Platform) voiceTask(text string, now time.Time) (voiceTaskReply, error) {
 	text = strings.TrimRight(strings.TrimSpace(text), "。！？.!? ")
 	if text == "继续下一步" || text == "完成当前任务" {
-		reply := "继续。"
+		reply := voiceTaskReply{text: "继续。", handled: true}
 		err := p.change(func(s *State) error {
 			var id string
 			for _, task := range s.Tasks {
-				if task.Status != "waiting" {
+				if task.Status != "waiting" || task.Index >= len(task.Steps) || task.Steps[task.Index].Kind == "ask" {
 					continue
 				}
 				if id != "" {
-					reply = "有多条任务等待确认，请在控制台选择。"
+					reply.text = "有多条任务等待确认，请在控制台选择。"
 					return errNoVoiceChange
 				}
 				id = task.ID
 			}
 			if id == "" {
-				reply = "目前没有等待确认的任务。"
+				reply.text = "目前没有可继续的确认步骤。"
 				return errNoVoiceChange
 			}
+			reply.taskID = id
 			return taskAction(s, id, "confirm", now)
 		})
 		if errors.Is(err, errNoVoiceChange) {
 			err = nil
 		}
-		return voiceTaskReply{text: reply, handled: true}, err
+		return reply, err
 	}
 	match := remindAfter.FindStringSubmatch(text)
 	ability := "reminder"

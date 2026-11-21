@@ -13,6 +13,7 @@ import (
 
 var wakeTone = tonePCM(90*time.Millisecond, 880)
 var alarmTone = tonePCM(300*time.Millisecond, 720)
+var deviceTones = map[string][]byte{"cue": wakeTone, "alarm": alarmTone}
 
 func tonePCM(duration time.Duration, frequency float64) []byte {
 	const rate = 24000
@@ -31,7 +32,15 @@ func (v *voiceRuntime) playTone(ctx context.Context, clip []byte) error {
 	if v.playPCM == nil {
 		return errors.New("本地提示音不可用")
 	}
-	return v.playPCM(ctx, bytes.NewReader(clip))
+	ctx, finish, err := v.startPlayback(ctx)
+	if err != nil {
+		return err
+	}
+	defer finish()
+	if err = v.playPCM(ctx, bytes.NewReader(clip)); ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
 }
 
 func (v *voiceRuntime) ring(ctx context.Context, interval time.Duration) error {

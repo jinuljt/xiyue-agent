@@ -26,24 +26,26 @@ const (
 )
 
 type voiceRuntime struct {
-	confirmLogin func(string) bool
-	speak        func(context.Context, string) error
-	playPCM      pcmPlayer
-	mu           sync.Mutex
-	active       bool
-	cancel       context.CancelFunc
-	last         *voiceResult
-	wakeReady    bool
-	follow       voiceCapture
-	conversing   bool
-	following    bool
-	alarmCancel  context.CancelFunc
+	confirmLogin   func(string) bool
+	speak          func(context.Context, string) error
+	playPCM        pcmPlayer
+	mu             sync.Mutex
+	active         bool
+	cancel         context.CancelFunc
+	last           *voiceResult
+	wakeReady      bool
+	follow         voiceCapture
+	conversing     bool
+	following      bool
+	alarmCancel    context.CancelFunc
+	playbackCancel context.CancelFunc
 }
 
 type voiceCapture func(context.Context, func([]byte) error) ([]byte, error)
 
 type voiceResult struct {
 	modelUsed  bool
+	taskID     string
 	CaptureMS  int64  `json:"capture_ms,omitempty"`
 	Revision   int    `json:"revision"`
 	Stage      string `json:"stage"`
@@ -313,6 +315,36 @@ func (v *voiceRuntime) stopAlarm() bool {
 	return true
 }
 
+func (v *voiceRuntime) startPlayback(parent context.Context) (context.Context, func(), error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.playbackCancel != nil {
+		return nil, nil, errVoiceBusy
+	}
+	ctx, cancel := context.WithCancel(parent)
+	v.playbackCancel = cancel
+	return ctx, func() {
+		cancel()
+		v.mu.Lock()
+		v.playbackCancel = nil
+		v.mu.Unlock()
+	}, nil
+}
+
+func (v *voiceRuntime) stopPlayback() bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.alarmCancel != nil {
+		v.alarmCancel()
+		return true
+	}
+	if v.playbackCancel == nil {
+		return false
+	}
+	v.playbackCancel()
+	return true
+}
+
 func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture voiceCapture, captureLED func(bool)) (result voiceResult, err error) {
 	return p.runSpeechTurn(parent, v, capture, captureLED, nil, false)
 }
@@ -402,7 +434,11 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 		return result, errors.New("请配置系统语音或可用的豆包语音合成服务")
 	}
 	result.Stage = "local_task"
-	taskReply, err := p.voiceTask(command, time.Now().UTC())
+	question := activeQuestion(s, time.Now().UTC())
+	var taskReply voiceTaskReply
+	if question == nil {
+		taskReply, err = p.voiceTask(command, time.Now().UTC())
+	}
 	if err != nil {
 		taskReply = voiceTaskReply{text: "这次没执行成功，请稍后再试。", handled: true}
 	}
@@ -416,7 +452,7 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 			previous = *history
 		}
 		var plan voicePlan
-		reply, err = p.requestReply(ctx, s, text, replyOptions{history: previous, voicePlan: &plan})
+		reply, err = p.requestReply(ctx, s, text, replyOptions{history: previous, voicePlan: &plan, question: question})
 		result.ModelMS = time.Since(start).Milliseconds()
 		if err != nil {
 			return result, err
@@ -428,7 +464,10 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 			}
 			plan = voicePlan{Action: "speak", Speech: "想结束时，直接说今天先这样就可以。"}
 		}
-		if plan.Action != "" {
+		if plan.Action == "next_step" && question != nil {
+			taskReply, err = p.confirmQuestion(*question, time.Now().UTC())
+			reply = taskReply.text
+		} else if plan.Action != "" {
 			taskReply, err = p.applyVoicePlan(plan, command, time.Now().UTC())
 			if err != nil {
 				taskReply = voiceTaskReply{text: "这次没执行成功，请稍后再试。"}
@@ -437,6 +476,7 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 		}
 		reply = speechForSpeaker(reply, command)
 	}
+	result.taskID = taskReply.taskID
 	result.Stage = "playback"
 	response = reply
 	start := time.Now()

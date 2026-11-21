@@ -223,6 +223,23 @@ func (p *Platform) runDeviceWake(ctx context.Context, v *voiceRuntime, capture v
 				return nil
 			})
 		}
+		if result.taskID != "" {
+			// Preserve queued step order so the user hears a question before
+			// the next capture. Bound the time spent on playback in this turn.
+			playback, cancel := context.WithTimeout(ctx, 30*time.Second)
+			for _, event := range p.snapshot().Events {
+				if playback.Err() != nil {
+					break
+				}
+				if event.TaskID == result.taskID && event.Delivery == "pending" {
+					if err := p.deliverTaskAudio(playback, v, time.Now().UTC(), result.taskID); err != nil {
+						log.Print("流程音频状态保存失败")
+						break
+					}
+				}
+			}
+			cancel()
+		}
 		if v.follow == nil {
 			return
 		}
@@ -269,7 +286,7 @@ func (p *Platform) runWakeDetector(parent context.Context, binary, keywords stri
 		}
 		if word, ok := detectedWakeWord(line); ok {
 			if word == "停止" {
-				v.stopAlarm()
+				v.stopPlayback()
 			} else if word == p.snapshot().Settings.WakeWord {
 				go p.runDeviceWake(parent, v, capture, setLED)
 			}

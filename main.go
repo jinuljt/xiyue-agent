@@ -57,6 +57,7 @@ func (a *api) routes() http.Handler {
 	m := http.NewServeMux()
 	a.settingsRoutes(m)
 	a.voiceRoutes(m)
+	a.deviceAudioRoutes(m)
 	a.adminRoutes(m)
 	a.externalTaskRoutes(m)
 	a.activityRoutes(m)
@@ -342,7 +343,8 @@ func (a *api) guard(next http.Handler) http.Handler {
 		if r.Method != "GET" && r.Method != "HEAD" {
 			contentType := strings.TrimSpace(strings.SplitN(r.Header.Get("Content-Type"), ";", 2)[0])
 			if r.Header.Get("X-Xiyue-Request") != "console" ||
-				(contentType != "application/json" && !(r.Method == http.MethodPost && r.URL.Path == "/api/voice/turn" && contentType == "audio/wav")) {
+				(contentType != "application/json" && !(r.Method == http.MethodPost && contentType == "audio/wav" &&
+					(r.URL.Path == "/api/voice/turn" || r.URL.Path == "/api/device/audio/transcribe"))) {
 				http.Error(w, "请求来源或格式无效", 403)
 				return
 			}

@@ -24,7 +24,7 @@ type Field struct {
 	Default  string `json:"default,omitempty"`
 }
 type Step struct {
-	Kind    string `json:"kind"` // say, confirm, timer
+	Kind    string `json:"kind"` // say, confirm, timer, tone, ask
 	Text    string `json:"text"`
 	Seconds int    `json:"seconds,omitempty"`
 }
@@ -54,13 +54,14 @@ type Task struct {
 	ResumeStatus string     `json:"resume_status,omitempty"`
 }
 type Event struct {
-	Alarm    bool      `json:"alarm,omitempty"`
-	Delivery string    `json:"delivery,omitempty"`
-	ID       string    `json:"id"`
-	TaskID   string    `json:"task_id"`
-	Text     string    `json:"text"`
-	Kind     string    `json:"kind"`
-	At       time.Time `json:"at"`
+	Alarm     bool      `json:"alarm,omitempty"`
+	StepIndex *int      `json:"step_index,omitempty"`
+	Delivery  string    `json:"delivery,omitempty"`
+	ID        string    `json:"id"`
+	TaskID    string    `json:"task_id"`
+	Text      string    `json:"text"`
+	Kind      string    `json:"kind"`
+	At        time.Time `json:"at"`
 }
 type Schedule struct {
 	ID        string            `json:"id"`
@@ -125,8 +126,14 @@ func validateManifest(m Manifest) error {
 		fields[f.Key] = f
 	}
 	for _, s := range m.Steps {
-		if s.Kind != "say" && s.Kind != "confirm" && s.Kind != "timer" {
-			return errors.New("首版仅支持播报、确认和计时步骤")
+		switch s.Kind {
+		case "say", "confirm", "timer", "ask":
+		case "tone":
+			if _, ok := deviceTones[s.Text]; !ok {
+				return errors.New("未知提示音，可选 cue 或 alarm")
+			}
+		default:
+			return errors.New("仅支持 say、confirm、timer、tone 和 ask 步骤")
 		}
 		if s.Text == "" || len(s.Text) > 4000 || (s.Kind == "timer" && (s.Seconds < 1 || s.Seconds > 604800)) || (s.Kind != "timer" && s.Seconds != 0) {
 			return errors.New("步骤文字或计时时长不合法")
@@ -295,7 +302,11 @@ func configValues(a Ability, overrides map[string]string) (map[string]string, er
 }
 func emit(s *State, t *Task, kind, text string, now time.Time) {
 	e := Event{ID: newID(), TaskID: t.ID, Kind: kind, Text: text, At: now, Alarm: kind == "speech" && t.AbilityID == quickTimer.ID}
-	if kind == "speech" && s.queueSpeech {
+	if kind == "ask" {
+		index := t.Index
+		e.StepIndex = &index
+	}
+	if (kind == "speech" || kind == "tone" || kind == "ask") && s.queueSpeech {
 		pending := 0
 		for _, queued := range s.Events {
 			if queued.Delivery == "pending" {
@@ -315,9 +326,9 @@ func advance(s *State, t *Task, now time.Time) {
 	t.Remaining = 0
 	for t.Index < len(t.Steps) {
 		step := t.Steps[t.Index]
-		emit(s, t, "speech", step.Text, now)
+		emitStep(s, t, step, now)
 		switch step.Kind {
-		case "confirm":
+		case "confirm", "ask":
 			t.Status = "waiting"
 			return
 		case "timer":
@@ -330,6 +341,14 @@ func advance(s *State, t *Task, now time.Time) {
 	}
 	t.Status = "done"
 	emit(s, t, "status", "任务已完成", now)
+}
+
+func emitStep(s *State, t *Task, step Step, now time.Time) {
+	kind := "speech"
+	if step.Kind == "tone" || step.Kind == "ask" {
+		kind = step.Kind
+	}
+	emit(s, t, kind, step.Text, now)
 }
 func startTask(s *State, abilityID string, inputs map[string]string, now time.Time) (string, error) {
 	a, ok := s.Abilities[abilityID]
@@ -407,6 +426,9 @@ func taskAction(s *State, id, action string, now time.Time) error {
 				t.DueAt = &due
 			}
 			t.Remaining = 0
+			if t.Status == "waiting" && t.Steps[t.Index].Kind == "ask" {
+				emitStep(s, t, t.Steps[t.Index], now)
+			}
 		case "cancel":
 			if t.Status == "done" || t.Status == "cancelled" {
 				return errors.New("任务已经结束")
@@ -419,7 +441,7 @@ func taskAction(s *State, id, action string, now time.Time) error {
 			if t.Status == "done" || t.Status == "cancelled" {
 				return errors.New("任务已经结束")
 			}
-			emit(s, t, "speech", t.Steps[t.Index].Text, now)
+			emitStep(s, t, t.Steps[t.Index], now)
 		default:
 			return errors.New("不支持的任务操作")
 		}

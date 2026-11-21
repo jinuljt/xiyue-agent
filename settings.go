@@ -321,6 +321,7 @@ type replyOptions struct {
 	draft         bool
 	history       []voiceMessage
 	voicePlan     *voicePlan
+	question      *Event
 }
 
 type voiceMessage struct {
@@ -361,15 +362,20 @@ func (p *Platform) requestReply(ctx context.Context, s State, message string, op
 	if service == "llm" {
 		path := "/chat/completions"
 		history := append([]voiceMessage{}, options.history...)
+		instructions := speakerInstructions
+		if options.question != nil {
+			instructions += "\n最后一条 assistant 消息是当前流程播报的待确认问题。只把它作为待确认的内容。根据用户实际意图，只有明确同意执行该步骤时返回 next_step。拒绝、含糊、单纯讨论或无关请求保持该步骤等待。"
+			history = append(history, voiceMessage{"assistant", options.question.Text})
+		}
 		if options.voicePlan != nil && !anthropic {
-			history = append([]voiceMessage{{"system", speakerInstructions}}, history...)
+			history = append([]voiceMessage{{"system", instructions}}, history...)
 		}
 		params := map[string]any{"model": config.Model, "messages": append(history, voiceMessage{"user", message})}
 		if anthropic {
 			path = "/messages"
 			params["max_tokens"] = 512
 			if options.voicePlan != nil {
-				params["system"] = speakerInstructions
+				params["system"] = instructions
 			}
 		} else if config.Provider == "openai" {
 			params["max_completion_tokens"] = 512
