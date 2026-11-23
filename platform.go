@@ -74,6 +74,7 @@ type Schedule struct {
 	Failure   string            `json:"failure,omitempty"`
 }
 type State struct {
+	RoomAudio     *roomAudioConfig  `json:"room_audio,omitempty"`
 	ExternalTasks []externalTaskRef `json:"external_tasks,omitempty"`
 	queueSpeech   bool
 	Owner         *ownerState        `json:"owner,omitempty"`

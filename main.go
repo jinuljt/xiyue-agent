@@ -28,6 +28,7 @@ type api struct {
 	platform                    *Platform
 	assets                      map[string][]byte
 	voice                       *voiceRuntime
+	room                        *roomAudio
 	speechProbe                 *voiceRuntime
 	probeCapture                voiceCapture
 	admin                       *adminGate
@@ -58,6 +59,7 @@ func (a *api) routes() http.Handler {
 	a.settingsRoutes(m)
 	a.voiceRoutes(m)
 	a.deviceAudioRoutes(m)
+	a.roomAudioRoutes(m)
 	a.adminRoutes(m)
 	a.externalTaskRoutes(m)
 	a.activityRoutes(m)
@@ -621,7 +623,7 @@ func main() {
 			}
 		}
 	}()
-	server := &http.Server{Handler: (&api{platform: p, assets: assets, voice: voice, speechProbe: speaker, probeCapture: probeCapture,
+	server := &http.Server{Handler: (&api{platform: p, assets: assets, voice: voice, room: newRoomAudio(ctx, speaker), speechProbe: speaker, probeCapture: probeCapture,
 		admin: admin, deviceModel: *deviceModel, deviceFirmware: *deviceFirmware}).routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 55 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	go func() {
 		<-ctx.Done()

@@ -39,6 +39,8 @@ type voiceRuntime struct {
 	following      bool
 	alarmCancel    context.CancelFunc
 	playbackCancel context.CancelFunc
+	roomCancel     context.CancelFunc
+	roomDone       chan struct{}
 }
 
 type voiceCapture func(context.Context, func([]byte) error) ([]byte, error)
@@ -317,18 +319,60 @@ func (v *voiceRuntime) stopAlarm() bool {
 
 func (v *voiceRuntime) startPlayback(parent context.Context) (context.Context, func(), error) {
 	v.mu.Lock()
-	defer v.mu.Unlock()
 	if v.playbackCancel != nil {
+		v.mu.Unlock()
 		return nil, nil, errVoiceBusy
 	}
 	ctx, cancel := context.WithCancel(parent)
 	v.playbackCancel = cancel
-	return ctx, func() {
+	v.mu.Unlock()
+	finish := func() {
 		cancel()
 		v.mu.Lock()
 		v.playbackCancel = nil
 		v.mu.Unlock()
-	}, nil
+	}
+	if err := v.yieldRoom(ctx); err != nil {
+		finish()
+		return nil, nil, err
+	}
+	return ctx, finish, nil
+}
+
+func (v *voiceRuntime) claimRoomPlayback(parent context.Context) (context.Context, func(), bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.active || v.conversing || v.playbackCancel != nil || v.roomDone != nil {
+		return nil, nil, false
+	}
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	v.roomCancel, v.roomDone = cancel, done
+	return ctx, func() {
+		cancel()
+		v.mu.Lock()
+		v.roomCancel, v.roomDone = nil, nil
+		close(done)
+		v.mu.Unlock()
+	}, true
+}
+
+func (v *voiceRuntime) yieldRoom(ctx context.Context) error {
+	v.mu.Lock()
+	done := v.roomDone
+	if v.roomCancel != nil {
+		v.roomCancel()
+	}
+	v.mu.Unlock()
+	if done == nil {
+		return ctx.Err()
+	}
+	select {
+	case <-done:
+		return ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (v *voiceRuntime) stopPlayback() bool {
@@ -386,6 +430,9 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 	s := p.snapshot()
 	result.Revision = s.Settings.Revision
 	result.Stage = "configuration"
+	if err := v.yieldRoom(ctx); err != nil {
+		return result, err
+	}
 	if captureLED != nil {
 		captureLED(true)
 	}

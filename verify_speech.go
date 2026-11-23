@@ -46,6 +46,10 @@ func (a *api) verifySpeech(w http.ResponseWriter, r *http.Request, s State, serv
 	start := time.Now()
 	result := map[string]any{"ok": true}
 	if service == "asr" {
+		if err := v.yieldRoom(ctx); err != nil {
+			bad(w, err)
+			return
+		}
 		text, err := a.platform.captureAndTranscribe(ctx, s, a.probeCapture, temporary, &voiceResult{}, true)
 		if err != nil {
 			bad(w, err)

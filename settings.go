@@ -105,6 +105,7 @@ func (p *Platform) publicState() State {
 	s.Sealed = nil
 	s.Owner = nil
 	s.ExternalTasks = nil
+	s.RoomAudio = nil
 	return s
 }
 
