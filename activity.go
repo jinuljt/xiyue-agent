@@ -60,12 +60,40 @@ type dialogueRecord struct {
 }
 
 type activityData struct {
+	LocalLast map[string]UsageRecord `json:"last_local_service,omitempty"`
 	Imported  bool                   `json:"legacy_imported"`
 	Recent    []UsageRecord          `json:"recent"`
 	Daily     map[string]usageBucket `json:"daily"`
 	Rates     map[string]usageRate   `json:"rates"`
 	Logging   bool                   `json:"dialogue_logging"`
 	Dialogues []dialogueRecord       `json:"dialogues"`
+}
+
+// Local service results are diagnostic evidence, separate from billable usage.
+func (a *activityStore) observeLocal(service, provider string, revision int, err error, at time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.loadErr != nil {
+		return
+	}
+	if a.data.LocalLast == nil {
+		a.data.LocalLast = map[string]UsageRecord{}
+	}
+	if a.data.LocalLast[service].At.After(at) {
+		return
+	}
+	a.data.LocalLast[service] = UsageRecord{Service: service, Provider: provider, ConfigRevision: revision, At: at, Success: err == nil}
+	a.dirty = true
+}
+
+func (a *activityStore) localResults() []UsageRecord {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	rows := make([]UsageRecord, 0, len(a.data.LocalLast))
+	for _, entry := range a.data.LocalLast {
+		rows = append(rows, entry)
+	}
+	return rows
 }
 
 type activityStore struct {

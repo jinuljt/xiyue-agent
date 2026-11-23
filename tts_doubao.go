@@ -54,6 +54,9 @@ func (p *Platform) playSpeechWithKey(ctx context.Context, v *voiceRuntime, s Sta
 		if err = v.speak(ctx, text); ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if !test {
+			p.activity.observeLocal("tts", "system", s.Settings.Revision, err, time.Now().UTC())
+		}
 		return err
 	}
 	key, err := p.serviceKey(s, "tts", temporary)

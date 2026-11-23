@@ -522,8 +522,15 @@ func (p *Platform) requestReply(ctx context.Context, s State, message string, op
 }
 
 type serviceStatus struct {
-	Provider string `json:"provider"`
-	State    string `json:"state"`
+	Provider string      `json:"provider"`
+	State    string      `json:"state"`
+	LastUse  *serviceUse `json:"last_use,omitempty"`
+}
+
+type serviceUse struct {
+	At            time.Time `json:"at"`
+	Success       bool      `json:"success"`
+	CurrentConfig bool      `json:"current_config"`
 }
 
 func (a *api) serviceStatus(s State) map[string]serviceStatus {
@@ -576,6 +583,23 @@ func (a *api) serviceStatus(s State) map[string]serviceStatus {
 			current.State = "failed"
 		}
 		services[entry.Service] = current
+	}
+	attachUse := func(entry UsageRecord) {
+		status, ok := services[entry.Service]
+		if !ok || entry.Test || entry.Provider != status.Provider || entry.At.IsZero() ||
+			(status.LastUse != nil && !entry.At.After(status.LastUse.At)) {
+			return
+		}
+		status.LastUse = &serviceUse{At: entry.At, Success: entry.Success, CurrentConfig: entry.ConfigRevision == config.Revision}
+		services[entry.Service] = status
+	}
+	for _, entry := range s.Usage {
+		attachUse(entry)
+	}
+	if a.platform != nil {
+		for _, entry := range a.platform.activity.localResults() {
+			attachUse(entry)
+		}
 	}
 	return services
 }

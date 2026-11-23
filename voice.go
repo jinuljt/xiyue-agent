@@ -169,6 +169,9 @@ func (p *Platform) captureAndTranscribe(ctx context.Context, s State, capture vo
 	start = time.Now()
 	text, err := transcribeSenseVoice(ctx, cfg, key, wav)
 	result.ASRMS = time.Since(start).Milliseconds()
+	if !test && ctx.Err() == nil {
+		p.activity.observeLocal("asr", cfg.Provider, s.Settings.Revision, err, time.Now().UTC())
+	}
 	return text, err
 }
 
