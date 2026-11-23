@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -26,10 +27,17 @@ func TestRoomAudioLifecycleAndPriority(t *testing.T) {
 	// A quiet 16 kHz mono signal. It should still reach the player.
 	quiet := bytes.Repeat([]byte{100, 0}, 320)
 	var connections atomic.Int32
+	const username, password = "demo-user", "demo-camera-password"
 	drop := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/audio.wav" {
 			http.NotFound(w, r)
+			return
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != username || pass != password {
+			w.Header().Set("WWW-Authenticate", `Basic realm="camera"`)
+			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 		number := connections.Add(1)
@@ -110,19 +118,34 @@ func TestRoomAudioLifecycleAndPriority(t *testing.T) {
 	}
 	fixtureAddress := "http://" + netip.AddrFrom4([4]byte{10, 0, 0, 1}).String() + "/audio.wav"
 	source := `{"source":"` + fixtureAddress + `","volume":70}`
+	credentials := source[:len(source)-1] + `,"username":"` + username + `","password":"` + password + `"}`
+	keepPassword := source[:len(source)-1] + `,"username":"` + username + `"}`
 	request("PUT", "", `{"source":"http://127.0.0.1/audio.wav","volume":70}`, 400)
 	request("PUT", "", `{"source":"http://169.254.169.254/audio.wav","volume":70}`, 400)
-	probe := request("POST", "/verify", source, 200)
+	denied := request("POST", "/verify", source, 400)
+	if !strings.Contains(denied.Body.String(), "核对用户名和密码") {
+		t.Fatal("missing authentication error")
+	}
+	probe := request("POST", "/verify", credentials, 200)
 	if !strings.Contains(probe.Body.String(), `"sample_rate":16000`) {
 		t.Fatal(probe.Body.String())
 	}
-	request("PUT", "", source, 200)
+	if saved := request("PUT", "", credentials, 200); strings.Contains(saved.Body.String(), password) {
+		t.Fatal("password echoed by API")
+	}
+	request("PUT", "", strings.Replace(keepPassword, "/audio.wav", "/new/audio.wav", 1), 400)
+	request("PUT", "", keepPassword, 200)
+	saved, err := os.ReadFile(p.path)
+	if err != nil || bytes.Contains(saved, []byte(password)) {
+		t.Fatal("password not encrypted on disk")
+	}
 	request("POST", "/start", "{}", 200)
 	// Always stop before closing the test HTTP server, including on assertions.
 	defer request("POST", "/stop", "{}", 200)
 	awaitPlayback()
 	current := request("GET", "", "", 200)
-	if !strings.Contains(current.Body.String(), `"stage":"playing"`) || !strings.Contains(current.Body.String(), `"last_audio_at"`) {
+	if !strings.Contains(current.Body.String(), `"stage":"playing"`) || !strings.Contains(current.Body.String(), `"last_audio_at"`) ||
+		!strings.Contains(current.Body.String(), `"password_configured":true`) || strings.Contains(current.Body.String(), password) {
 		t.Fatal(current.Body.String())
 	}
 	request("PUT", "", source, 409)

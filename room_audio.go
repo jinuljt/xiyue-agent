@@ -15,14 +15,48 @@ import (
 )
 
 type roomAudioConfig struct {
-	Name   string `json:"name"`
-	Source string `json:"source"`
-	Volume int    `json:"volume"`
+	Name     string `json:"name"`
+	Source   string `json:"source"`
+	Volume   int    `json:"volume"`
+	Username string `json:"username,omitempty"`
+}
+
+const roomPasswordKey = "room-audio:password"
+
+var errRoomAuth = errors.New("IP Webcam 拒绝访问，请核对用户名和密码")
+
+type roomAudioInput struct {
+	roomAudioConfig
+	Password string `json:"password,omitempty"`
+}
+
+func (p *Platform) roomPassword(s State, c roomAudioConfig, password string) (string, error) {
+	if c.Username == "" {
+		if password != "" {
+			return "", errors.New("请填写 IP Webcam 用户名")
+		}
+		return "", nil
+	}
+	if c.Source == "" {
+		return "", errors.New("请填写收音地址")
+	}
+	if password != "" {
+		return password, validateServiceKey(password)
+	}
+	prev := s.RoomAudio
+	if prev == nil || prev.Source != c.Source || prev.Username != c.Username || s.Sealed[roomPasswordKey] == "" {
+		return "", errors.New("请填写此收音地址和用户名对应的密码")
+	}
+	return p.unseal(roomPasswordKey, s.Sealed[roomPasswordKey])
 }
 
 func (c *roomAudioConfig) validate() error {
 	c.Name = strings.TrimSpace(c.Name)
 	c.Source = strings.TrimSpace(c.Source)
+	c.Username = strings.TrimSpace(c.Username)
+	if len(c.Username) > 128 || strings.ContainsAny(c.Username, ":\r\n\x00") {
+		return errors.New("IP Webcam 用户名无效")
+	}
 	if len([]rune(c.Name)) > 60 {
 		return errors.New("收音名称最多 60 个字")
 	}
@@ -53,6 +87,7 @@ type roomAudioStatus struct {
 	Running   bool       `json:"running"`
 	Stage     string     `json:"stage"`
 	LastAudio *time.Time `json:"last_audio_at,omitempty"`
+	Problem   string     `json:"problem,omitempty"`
 }
 
 type roomAudio struct {
@@ -95,10 +130,13 @@ func newRoomAudio(ctx context.Context, voice *voiceRuntime) *roomAudio {
 	return &roomAudio{parent: ctx, voice: voice, client: client, status: roomAudioStatus{Stage: "stopped"}}
 }
 
-func (r *roomAudio) open(ctx context.Context, source string) (roomWAV, io.Closer, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
+func (r *roomAudio) open(ctx context.Context, c roomAudioConfig, password string) (roomWAV, io.Closer, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Source, nil)
 	if err != nil {
 		return roomWAV{}, nil, errors.New("音频地址无效")
+	}
+	if c.Username != "" {
+		req.SetBasicAuth(c.Username, password)
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
@@ -106,6 +144,9 @@ func (r *roomAudio) open(ctx context.Context, source string) (roomWAV, io.Closer
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return roomWAV{}, nil, errRoomAuth
+		}
 		return roomWAV{}, nil, errors.New("收音设备没有返回音频，请检查地址和访问设置")
 	}
 	wav, err := openRoomWAV(resp.Body)
@@ -121,11 +162,14 @@ func (r *roomAudio) stage(stage string) {
 	defer r.mu.Unlock()
 	if r.status.Stage != "stopping" {
 		r.status.Stage = stage
+		if stage == "connected" {
+			r.status.Problem = ""
+		}
 	}
 }
 
-func (r *roomAudio) relay(ctx context.Context, c roomAudioConfig) error {
-	wav, body, err := r.open(ctx, c.Source)
+func (r *roomAudio) relay(ctx context.Context, c roomAudioConfig, password string) error {
+	wav, body, err := r.open(ctx, c, password)
 	if err != nil {
 		return err
 	}
@@ -152,7 +196,7 @@ func (r *roomAudio) relay(ctx context.Context, c roomAudioConfig) error {
 	return streamErr
 }
 
-func (r *roomAudio) run(ctx context.Context, c roomAudioConfig, done chan struct{}) {
+func (r *roomAudio) run(ctx context.Context, c roomAudioConfig, password string, done chan struct{}) {
 	defer func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
@@ -165,13 +209,18 @@ func (r *roomAudio) run(ctx context.Context, c roomAudioConfig, done chan struct
 		delay := 200 * time.Millisecond
 		if ok {
 			r.stage("connecting")
-			err := r.relay(attempt, c)
+			err := r.relay(attempt, c, password)
 			preempted := attempt.Err() != nil
 			finish()
 			if preempted {
 				r.stage("paused")
 			} else if err != nil {
 				r.stage("reconnecting")
+				r.mu.Lock()
+				if errors.Is(err, errRoomAuth) {
+					r.status.Problem = errRoomAuth.Error()
+				}
+				r.mu.Unlock()
 				delay = 2 * time.Second
 			}
 		} else {
@@ -207,14 +256,17 @@ func (a *api) roomAudioRoutes(m *http.ServeMux) {
 			status = a.room.status
 			a.room.mu.Unlock()
 		}
-		writeJSON(w, 200, map[string]any{"available": a.room.available(), "config": a.platform.roomConfig(), "status": status})
+		s := a.platform.snapshot()
+		writeJSON(w, 200, map[string]any{"available": a.room.available(), "config": a.platform.roomConfig(), "status": status,
+			"password_configured": s.Sealed[roomPasswordKey] != ""})
 	})
 	m.HandleFunc("PUT /api/room-audio", func(w http.ResponseWriter, req *http.Request) {
-		var c roomAudioConfig
-		if err := decode(w, req, &c); err != nil {
+		var in roomAudioInput
+		if err := decode(w, req, &in); err != nil {
 			bad(w, err)
 			return
 		}
+		c := in.roomAudioConfig
 		if err := c.validate(); err != nil {
 			bad(w, err)
 			return
@@ -227,18 +279,38 @@ func (a *api) roomAudioRoutes(m *http.ServeMux) {
 				return
 			}
 		}
-		if err := a.platform.change(func(s *State) error { s.RoomAudio = &c; return nil }); err != nil {
+		if err := a.platform.change(func(s *State) error {
+			password, err := a.platform.roomPassword(*s, c, in.Password)
+			if err != nil {
+				return err
+			}
+			if c.Username == "" {
+				delete(s.Sealed, roomPasswordKey)
+			} else if in.Password != "" {
+				sealed, err := a.platform.seal(roomPasswordKey, password)
+				if err != nil {
+					return err
+				}
+				if s.Sealed == nil {
+					s.Sealed = map[string]string{}
+				}
+				s.Sealed[roomPasswordKey] = sealed
+			}
+			s.RoomAudio = &c
+			return nil
+		}); err != nil {
 			bad(w, err)
 			return
 		}
 		writeJSON(w, 200, c)
 	})
 	m.HandleFunc("POST /api/room-audio/verify", func(w http.ResponseWriter, req *http.Request) {
-		var c roomAudioConfig
-		if err := decode(w, req, &c); err != nil {
+		var in roomAudioInput
+		if err := decode(w, req, &in); err != nil {
 			bad(w, err)
 			return
 		}
+		c := in.roomAudioConfig
 		if err := c.validate(); err != nil {
 			bad(w, err)
 			return
@@ -249,7 +321,12 @@ func (a *api) roomAudioRoutes(m *http.ServeMux) {
 		}
 		ctx, cancel := context.WithTimeout(req.Context(), 8*time.Second)
 		defer cancel()
-		wav, body, err := a.room.open(ctx, c.Source)
+		password, err := a.platform.roomPassword(a.platform.snapshot(), c, in.Password)
+		if err != nil {
+			bad(w, err)
+			return
+		}
+		wav, body, err := a.room.open(ctx, c, password)
 		if err != nil {
 			bad(w, err)
 			return
@@ -289,6 +366,7 @@ func (r *roomAudio) start(p *Platform) (roomAudioStatus, error) {
 		return r.status, errors.New("听音正在停止")
 	}
 	if r.cancel == nil {
+		s := p.snapshot()
 		c := p.roomConfig()
 		if err := c.validate(); err != nil {
 			return r.status, err
@@ -296,10 +374,14 @@ func (r *roomAudio) start(p *Platform) (roomAudioStatus, error) {
 		if c.Source == "" {
 			return r.status, errors.New("请先保存收音地址")
 		}
+		password, err := p.roomPassword(s, c, "")
+		if err != nil {
+			return r.status, err
+		}
 		ctx, cancel := context.WithCancel(r.parent)
 		r.cancel, r.done = cancel, make(chan struct{})
 		r.status = roomAudioStatus{Running: true, Stage: "connecting"}
-		go r.run(ctx, c, r.done)
+		go r.run(ctx, c, password, r.done)
 	}
 	return r.status, nil
 }
