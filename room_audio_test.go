@@ -187,4 +187,21 @@ func TestRoomAudioLifecycleAndPriority(t *testing.T) {
 	if config := reopened.roomConfig(); config.Source != fixtureAddress || config.Volume != 70 {
 		t.Fatalf("config was not restored: %+v", config)
 	}
+	draft := strings.Replace(keepPassword, `"volume":70`, `"volume":35,"name":"temporary"`, 1)
+	started := request("POST", "/start", `{"config":`+draft+`}`, 200)
+	if !strings.Contains(started.Body.String(), `"name":"temporary"`) {
+		t.Fatal("draft name not in playback status")
+	}
+	select {
+	case sample := <-played:
+		if sample != 35 {
+			t.Fatalf("draft volume produced sample %d", sample)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("draft did not start playback")
+	}
+	request("POST", "/stop", "{}", 200)
+	if config := p.roomConfig(); config.Name != "" || config.Volume != 70 {
+		t.Fatal("starting playback changed saved configuration")
+	}
 }

@@ -84,6 +84,7 @@ func (c *roomAudioConfig) validate() error {
 }
 
 type roomAudioStatus struct {
+	Name      string     `json:"name,omitempty"`
 	Running   bool       `json:"running"`
 	Stage     string     `json:"stage"`
 	LastAudio *time.Time `json:"last_audio_at,omitempty"`
@@ -344,7 +345,16 @@ func (a *api) roomAudioRoutes(m *http.ServeMux) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "此设备没有可用的本地播放入口"})
 			return
 		}
-		status, err := a.room.start(a.platform)
+		var in struct {
+			Config *roomAudioInput `json:"config"`
+		}
+		if req.ContentLength != 0 {
+			if err := decode(w, req, &in); err != nil {
+				bad(w, err)
+				return
+			}
+		}
+		status, err := a.room.startWithConfig(a.platform, in.Config)
 		if err != nil {
 			bad(w, err)
 			return
@@ -357,6 +367,10 @@ func (a *api) roomAudioRoutes(m *http.ServeMux) {
 }
 
 func (r *roomAudio) start(p *Platform) (roomAudioStatus, error) {
+	return r.startWithConfig(p, nil)
+}
+
+func (r *roomAudio) startWithConfig(p *Platform, draft *roomAudioInput) (roomAudioStatus, error) {
 	if !r.available() {
 		return roomAudioStatus{}, errors.New("此设备没有可用的本地播放入口")
 	}
@@ -368,19 +382,23 @@ func (r *roomAudio) start(p *Platform) (roomAudioStatus, error) {
 	if r.cancel == nil {
 		s := p.snapshot()
 		c := p.roomConfig()
+		var temporary string
+		if draft != nil {
+			c, temporary = draft.roomAudioConfig, draft.Password
+		}
 		if err := c.validate(); err != nil {
 			return r.status, err
 		}
 		if c.Source == "" {
-			return r.status, errors.New("请先保存收音地址")
+			return r.status, errors.New("请填写收音地址")
 		}
-		password, err := p.roomPassword(s, c, "")
+		password, err := p.roomPassword(s, c, temporary)
 		if err != nil {
 			return r.status, err
 		}
 		ctx, cancel := context.WithCancel(r.parent)
 		r.cancel, r.done = cancel, make(chan struct{})
-		r.status = roomAudioStatus{Running: true, Stage: "connecting"}
+		r.status = roomAudioStatus{Name: c.Name, Running: true, Stage: "connecting"}
 		go r.run(ctx, c, password, r.done)
 	}
 	return r.status, nil
