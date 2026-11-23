@@ -71,6 +71,7 @@ func (p *Platform) deliverTaskAudio(parent context.Context, v *voiceRuntime, now
 		v.mu.Lock()
 		v.active, v.cancel = false, nil
 		v.alarmCancel = nil
+		v.alarmClock = ""
 		v.mu.Unlock()
 	}()
 	var claimed Event
@@ -117,6 +118,7 @@ func (p *Platform) deliverTaskAudio(parent context.Context, v *voiceRuntime, now
 	if claimed.Alarm {
 		v.mu.Lock()
 		v.alarmCancel = cancel
+		v.alarmClock = claimed.ClockID
 		v.mu.Unlock()
 	}
 	speechCtx, stopSpeech := context.WithTimeout(ctx, 30*time.Second)

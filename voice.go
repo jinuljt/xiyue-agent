@@ -38,6 +38,7 @@ type voiceRuntime struct {
 	conversing     bool
 	following      bool
 	alarmCancel    context.CancelFunc
+	alarmClock     string
 	playbackCancel context.CancelFunc
 	roomCancel     context.CancelFunc
 	roomDone       chan struct{}

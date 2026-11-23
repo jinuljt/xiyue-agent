@@ -29,6 +29,7 @@ type Step struct {
 	Seconds int    `json:"seconds,omitempty"`
 }
 type Manifest struct {
+	Menu        bool    `json:"menu,omitempty"`
 	ID          string  `json:"id"`
 	Version     string  `json:"version"`
 	Name        string  `json:"name"`
@@ -54,6 +55,7 @@ type Task struct {
 	ResumeStatus string     `json:"resume_status,omitempty"`
 }
 type Event struct {
+	ClockID   string    `json:"clock_id,omitempty"`
 	Alarm     bool      `json:"alarm,omitempty"`
 	StepIndex *int      `json:"step_index,omitempty"`
 	Delivery  string    `json:"delivery,omitempty"`
@@ -64,6 +66,8 @@ type Event struct {
 	At        time.Time `json:"at"`
 }
 type Schedule struct {
+	AlarmName string            `json:"alarm_name,omitempty"`
+	SnoozeAt  *time.Time        `json:"snooze_at,omitempty"`
 	ID        string            `json:"id"`
 	AbilityID string            `json:"ability_id"`
 	Inputs    map[string]string `json:"inputs"`
@@ -74,6 +78,8 @@ type Schedule struct {
 	Failure   string            `json:"failure,omitempty"`
 }
 type State struct {
+	Features      map[string]bool   `json:"features,omitempty"`
+	Rules         []automationRule  `json:"rules,omitempty"`
 	RoomAudio     *roomAudioConfig  `json:"room_audio,omitempty"`
 	ExternalTasks []externalTaskRef `json:"external_tasks,omitempty"`
 	queueSpeech   bool
@@ -509,10 +515,20 @@ func tick(s *State, now time.Time) {
 	}
 	for i := range s.Schedules {
 		sc := &s.Schedules[i]
-		if !scheduleDue(*sc, now) {
+		if sc.AlarmName != "" {
+			tickClock(s, sc, now)
 			continue
 		}
+		if !clockDue(*s, *sc, now) {
+			continue
+		}
+		firstEvent := len(s.Events)
 		_, err := startTask(s, sc.AbilityID, sc.Inputs, now)
+		if sc.AbilityID == quickTimer.ID {
+			for i := firstEvent; i < len(s.Events); i++ {
+				s.Events[i].ClockID = sc.ID
+			}
+		}
 		sc.Failure = ""
 		if err != nil {
 			sc.Failure = err.Error()
@@ -588,7 +604,7 @@ func (p *Platform) tick(now time.Time) error {
 		}
 	}
 	for _, sc := range p.state.Schedules {
-		if scheduleDue(sc, now) {
+		if clockDue(p.state, sc, now) {
 			due = true
 		}
 	}

@@ -60,6 +60,8 @@ func (a *api) routes() http.Handler {
 	a.voiceRoutes(m)
 	a.deviceAudioRoutes(m)
 	a.roomAudioRoutes(m)
+	a.clockRoutes(m)
+	a.automationRoutes(m)
 	a.adminRoutes(m)
 	a.externalTaskRoutes(m)
 	a.activityRoutes(m)
@@ -88,6 +90,10 @@ func (a *api) routes() http.Handler {
 		}
 		if err := validateManifest(manifest); err != nil {
 			bad(w, err)
+			return
+		}
+		if manifest.ID == quickTimer.ID {
+			bad(w, errors.New("此能力使用了系统保留的 ID"))
 			return
 		}
 		err := a.platform.change(func(s *State) error {
@@ -603,6 +609,24 @@ func main() {
 			go p.serveWakeDetector(ctx, *wakeDetector, *wakeKeywords, voice, capture, captureLED)
 		}
 	}
+	room := newRoomAudio(ctx, speaker)
+	if err := p.recoverAutomation(); err != nil {
+		log.Fatal("无法恢复自动化运行记录")
+	}
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				if err := p.runAutomation(now.UTC(), room); err != nil {
+					log.Print("自动化运行状态保存失败")
+				}
+			}
+		}
+	}()
 	go func() {
 		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
@@ -623,7 +647,7 @@ func main() {
 			}
 		}
 	}()
-	server := &http.Server{Handler: (&api{platform: p, assets: assets, voice: voice, room: newRoomAudio(ctx, speaker), speechProbe: speaker, probeCapture: probeCapture,
+	server := &http.Server{Handler: (&api{platform: p, assets: assets, voice: voice, room: room, speechProbe: speaker, probeCapture: probeCapture,
 		admin: admin, deviceModel: *deviceModel, deviceFirmware: *deviceFirmware}).routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 55 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	go func() {
 		<-ctx.Done()

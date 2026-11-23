@@ -157,9 +157,13 @@ func (p *Platform) voiceTask(text string, now time.Time) (voiceTaskReply, error)
 func (p *Platform) scheduleVoiceTask(ability, content string, duration time.Duration, now time.Time) error {
 	return p.change(func(s *State) error {
 		if ability == quickTimer.ID {
+			if !featureEnabled(s, "timers") {
+				return errors.New("倒计时未启用")
+			}
 			kept := s.Schedules[:0]
 			for _, schedule := range s.Schedules {
-				if schedule.AbilityID != quickTimer.ID || schedule.Enabled {
+				recent := now.Sub(schedule.NextAt) <= deliveryMaxAge
+				if schedule.AbilityID != quickTimer.ID || schedule.Enabled || recent {
 					kept = append(kept, schedule)
 				}
 			}

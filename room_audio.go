@@ -263,54 +263,67 @@ func (a *api) roomAudioRoutes(m *http.ServeMux) {
 		writeJSON(w, 200, map[string]int{"sample_rate": wav.rate, "channels": wav.channels})
 	})
 	m.HandleFunc("POST /api/room-audio/start", func(w http.ResponseWriter, req *http.Request) {
-		r := a.room
-		if !r.available() {
+		if !a.room.available() {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "此设备没有可用的本地播放入口"})
 			return
 		}
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		if r.cancel == nil {
-			c := a.platform.roomConfig()
-			if err := c.validate(); err != nil {
-				bad(w, err)
-				return
-			}
-			if c.Source == "" {
-				bad(w, errors.New("请先保存收音地址"))
-				return
-			}
-			ctx, cancel := context.WithCancel(r.parent)
-			r.cancel, r.done = cancel, make(chan struct{})
-			r.status = roomAudioStatus{Running: true, Stage: "connecting"}
-			go r.run(ctx, c, r.done)
-		}
-		writeJSON(w, 200, r.status)
-	})
-	m.HandleFunc("POST /api/room-audio/stop", func(w http.ResponseWriter, req *http.Request) {
-		r := a.room
-		if r == nil {
-			writeJSON(w, 200, roomAudioStatus{Stage: "stopped"})
+		status, err := a.room.start(a.platform)
+		if err != nil {
+			bad(w, err)
 			return
 		}
-		r.mu.Lock()
-		done := r.done
-		if r.cancel != nil {
-			r.status.Stage = "stopping"
-			r.cancel()
-		}
-		r.mu.Unlock()
-		if done != nil {
-			ctx, cancel := context.WithTimeout(req.Context(), 3*time.Second)
-			defer cancel()
-			select {
-			case <-done:
-			case <-ctx.Done():
-			}
-		}
-		r.mu.Lock()
-		status := r.status
-		r.mu.Unlock()
 		writeJSON(w, 200, status)
 	})
+	m.HandleFunc("POST /api/room-audio/stop", func(w http.ResponseWriter, req *http.Request) {
+		writeJSON(w, 200, a.room.stop(req.Context()))
+	})
+}
+
+func (r *roomAudio) start(p *Platform) (roomAudioStatus, error) {
+	if !r.available() {
+		return roomAudioStatus{}, errors.New("此设备没有可用的本地播放入口")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.status.Stage == "stopping" {
+		return r.status, errors.New("听音正在停止")
+	}
+	if r.cancel == nil {
+		c := p.roomConfig()
+		if err := c.validate(); err != nil {
+			return r.status, err
+		}
+		if c.Source == "" {
+			return r.status, errors.New("请先保存收音地址")
+		}
+		ctx, cancel := context.WithCancel(r.parent)
+		r.cancel, r.done = cancel, make(chan struct{})
+		r.status = roomAudioStatus{Running: true, Stage: "connecting"}
+		go r.run(ctx, c, r.done)
+	}
+	return r.status, nil
+}
+
+func (r *roomAudio) stop(parent context.Context) roomAudioStatus {
+	if r == nil {
+		return roomAudioStatus{Stage: "stopped"}
+	}
+	r.mu.Lock()
+	done := r.done
+	if r.cancel != nil {
+		r.status.Stage = "stopping"
+		r.cancel()
+	}
+	r.mu.Unlock()
+	if done != nil {
+		ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+		defer cancel()
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.status
 }
