@@ -71,7 +71,9 @@ func TestAutomationRunsConditionsAndActionsInOrder(t *testing.T) {
 	if err := p.change(func(s *State) error {
 		s.RoomAudio = &roomAudioConfig{Source: "http://" + netip.AddrFrom4([4]byte{10, 0, 0, 1}).String() + "/audio.wav", Volume: 70}
 		s.Rules = append(s.Rules, automationRule{ID: "start", Name: "fixture", Schedule: Schedule{NextAt: now, Repeat: "once", Enabled: true, Timezone: "Asia/Shanghai"},
-			Condition: "room_off", Actions: []automationStep{{Action: "room_start"}, {Action: "speak", Value: "fixture"}, {Action: "timer", Seconds: 15}}})
+			StateConditions: []automationStateCondition{{Source: roomStateID, Equals: "off"}},
+			Actions: []automationStep{{Action: "tool", Value: roomStartToolID}, {Action: "speak", Value: "fixture"},
+				{Action: "tool", Value: timerToolID, Parameters: map[string]string{"seconds": "15"}}}})
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -100,7 +102,7 @@ func TestAutomationRunsConditionsAndActionsInOrder(t *testing.T) {
 	if s := p.snapshot(); s.Rules[0].Runs[0].Status != "skipped" || len(s.Schedules) != 1 {
 		t.Fatal("false condition did not prevent actions")
 	}
-	if err := p.runAutomationStep(room, automationStep{Action: "room_stop"}, now); err != nil {
+	if _, err := p.automationTool(room, roomStopToolID, nil, now); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -114,7 +116,7 @@ func TestAutomationWaitConfirmAndTimeout(t *testing.T) {
 	p.queueSpeech = true
 	rule := automationRule{ID: "cooking", Name: "炖菜", Trigger: "manual", Schedule: Schedule{Enabled: true},
 		Actions: []automationStep{{Action: "confirm", Value: "准备好后说继续下一步。", Seconds: 10, OnTimeout: "stop"},
-			{Action: "wait", Seconds: 4}, {Action: "timer", Seconds: 3}}}
+			{Action: "wait", Seconds: 4}, {Action: "tool", Value: timerToolID, Parameters: map[string]string{"seconds": "3"}}}}
 	if err := p.change(func(s *State) error { s.Rules = []automationRule{rule}; return nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -192,12 +194,16 @@ func TestAutomationConfirmJumpsToChosenStep(t *testing.T) {
 }
 
 func TestAutomationTimeConditionAcrossMidnight(t *testing.T) {
-	rule := automationRule{Condition: "room_off", After: "21:00", Before: "06:00"}
+	rule := automationRule{StateConditions: []automationStateCondition{{Source: roomStateID, Equals: "off"}}, After: "21:00", Before: "06:00"}
 	night := time.Date(2026, 11, 24, 18, 0, 0, 0, time.UTC)
-	if !automationConditions(rule, "Asia/Shanghai", night, false) ||
-		automationConditions(rule, "Asia/Shanghai", night, true) ||
-		automationConditions(rule, "Asia/Shanghai", night.Add(8*time.Hour), false) {
-		t.Fatal("time or room condition did not match device timezone")
+	sources := automationStateSources(&State{}, nil)
+	stopped := map[string]automationObservation{roomStateID: {value: "off"}}
+	running := map[string]automationObservation{roomStateID: {value: "on"}}
+	if !automationConditions(rule, "Asia/Shanghai", night, sources, stopped) ||
+		automationConditions(rule, "Asia/Shanghai", night, sources, running) ||
+		automationConditions(rule, "Asia/Shanghai", night, sources, nil) ||
+		automationConditions(rule, "Asia/Shanghai", night.Add(8*time.Hour), sources, stopped) {
+		t.Fatal("time or state condition did not match device timezone")
 	}
 }
 
@@ -222,16 +228,16 @@ func TestAutomationHomeAssistantTransition(t *testing.T) {
 	if err := p.change(func(s *State) error {
 		s.HomeAssistant = fixture.URL
 		s.HTTPTools = []networkTool{{ID: "door", Kind: "ha", Entity: "binary_sensor.door", Operation: "state", Automation: true}}
-		s.Rules = []automationRule{{ID: "door-opens", Name: "门打开", Trigger: "entity", Entity: "door", ToState: "on",
+		s.Rules = []automationRule{{ID: "door-opens", Name: "门打开", Trigger: "state", StateSource: "door", ToState: "on",
 			Schedule: Schedule{Enabled: true}, Actions: []automationStep{{Action: "wait", Seconds: 1}}}}
 		return p.putNetworkKey(s, haSecret, "fixture-token", false)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	baseline := automationEntityBaseline{}
+	baseline := map[string]automationStateBaseline{}
 	poll := func() int {
 		t.Helper()
-		if err := p.pollAutomationEntities(context.Background(), nil, &baseline); err != nil {
+		if err := p.pollAutomationStates(context.Background(), nil, baseline); err != nil {
 			t.Fatal(err)
 		}
 		return len(p.snapshot().Rules[0].Runs)

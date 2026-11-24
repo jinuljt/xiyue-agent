@@ -7,6 +7,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"strconv"
 )
 
 var bundledFlowHashes = map[string]string{
@@ -91,4 +92,32 @@ func (p *Platform) migrateLegacyFlows() error {
 		}
 		return nil
 	})
+}
+
+// Rules and exported workflows from earlier releases use names for individual tools.
+func upgradeAutomationRule(rule *automationRule) {
+	switch rule.Condition {
+	case "room_on", "room_off":
+		rule.StateConditions = append(rule.StateConditions, automationStateCondition{Source: roomStateID, Equals: rule.Condition[5:]})
+		rule.Condition = ""
+	}
+	if rule.Trigger == "entity" {
+		rule.Trigger, rule.StateSource, rule.Entity = "state", rule.Entity, ""
+	}
+	for i := range rule.Actions {
+		step := &rule.Actions[i]
+		switch step.Action {
+		case "http_tool":
+			step.Action = "tool"
+		case "room_start":
+			step.Action, step.Value = "tool", roomStartToolID
+		case "room_stop":
+			step.Action, step.Value = "tool", roomStopToolID
+		case "timer":
+			step.Parameters = map[string]string{"seconds": strconv.Itoa(step.Seconds), "name": step.Value}
+			step.Action, step.Value, step.Seconds = "tool", timerToolID, 0
+		default:
+			continue
+		}
+	}
 }

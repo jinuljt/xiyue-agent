@@ -94,3 +94,27 @@ func TestPracticeCapabilityUsesASRAndTTSIntersection(t *testing.T) {
 		t.Fatal("practice remains active")
 	}
 }
+
+func TestSetupStageUsesRuntimeReadiness(t *testing.T) {
+	var a api
+	s := State{Settings: defaultSettings()}
+	if stage := a.setupStage(s); stage != "configure" {
+		t.Fatal(stage)
+	}
+	s.Settings.Mode = "external"
+	if stage := a.setupStage(s); stage != "configure_external" {
+		t.Fatal(stage)
+	}
+	s.Settings.External.Endpoint = "https://connector.example/v1/chat"
+	if stage := a.setupStage(s); stage != "verify" {
+		t.Fatal(stage)
+	}
+	a.voice = &voiceRuntime{}
+	if stage := a.setupStage(s); stage != "configure_asr" {
+		t.Fatal(stage)
+	}
+	s.Settings.ASR.KeyConfigured = true
+	if stage := a.setupStage(s); stage != "configure_tts" {
+		t.Fatal(stage)
+	}
+}

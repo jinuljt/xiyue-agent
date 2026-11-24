@@ -382,12 +382,16 @@ func (a *api) consoleSnapshot(w http.ResponseWriter, r *http.Request) {
 	session := a.sessionStatus(r)
 	payload := map[string]any{"session": session}
 	if session["authenticated"] {
-		s := a.platform.publicState()
+		snapshot := a.platform.snapshot()
+		s := snapshot.publicFields()
 		q := r.URL.Query()
 		view := q.Get("view")
 		payload["state"] = s
 		payload["status"] = a.runtimeStatus(s, view == "device-status")
 		payload["practice_available"] = s.Settings.supportsPractice(s.Settings.practiceLanguage())
+		if view == "automation" || view == "automation-editor" {
+			payload["automation_options"] = a.automationOptions(snapshot)
+		}
 		if view == "home" {
 			payload["usage"] = a.platform.activity.usageSummary(s.Settings.Timezone)
 		}
@@ -647,7 +651,7 @@ func main() {
 	if err := room.restore(p); err != nil {
 		log.Print("远程听音配置未能恢复，请在控制台检查")
 	}
-	go p.watchAutomationEntities(ctx, room)
+	go p.watchAutomationStates(ctx, room)
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()

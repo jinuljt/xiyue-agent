@@ -468,13 +468,10 @@ func (a *api) networkToolRoutes(m *http.ServeMux) {
 				if old.Endpoint != t.Endpoint && s.Sealed["network:"+id] != "" && in.APIKey == "" && !in.ClearKey {
 					return errors.New("地址已更改，请替换或清除旧凭证")
 				}
-				if old.Endpoint != t.Endpoint || old.Entity != t.Entity || old.Operation != t.Operation || old.Method != t.Method || !slices.Equal(old.Parameters, t.Parameters) {
-					for _, rule := range s.Rules {
-						for _, step := range rule.Actions {
-							if step.Action == "http_tool" && step.Value == id {
-								return errors.New("工具已被自动化使用，请先移除规则中的对应动作")
-							}
-						}
+				if old.Endpoint != t.Endpoint || old.Entity != t.Entity || old.Operation != t.Operation || old.Method != t.Method ||
+					old.Extract != t.Extract || !slices.Equal(old.Parameters, t.Parameters) {
+					if automationUsesTool(s, id) {
+						return errors.New("工具被自动化引用，请先移除流程中的引用")
 					}
 				}
 			} else {
@@ -507,12 +504,8 @@ func (a *api) networkToolRoutes(m *http.ServeMux) {
 			if _, ok := findNetworkTool(s, id); !ok {
 				return errors.New("工具不存在")
 			}
-			for _, rule := range s.Rules {
-				for _, step := range rule.Actions {
-					if step.Action == "http_tool" && step.Value == id {
-						return errors.New("请先移除自动化中的对应动作")
-					}
-				}
+			if automationUsesTool(s, id) {
+				return errors.New("请先移除自动化中的工具引用")
 			}
 			s.HTTPTools = slices.DeleteFunc(s.HTTPTools, func(t networkTool) bool { return t.ID == id })
 			delete(s.Sealed, "network:"+id)
@@ -562,4 +555,25 @@ func (a *api) networkToolRoutes(m *http.ServeMux) {
 		}
 		writeJSON(w, 200, map[string]any{"result": out.text, "value": out.Value})
 	})
+}
+
+func (t networkTool) automationState(s *State) (automationStateSpec, bool) {
+	if !t.Automation || t.Kind != "ha" || t.Operation != "state" {
+		return automationStateSpec{}, false
+	}
+	return automationStateSpec{
+		ID: t.ID, Name: t.Name, group: "home-assistant", key: t.Entity,
+		identity: [3]string{s.HomeAssistant, s.Sealed[haSecret], t.Entity},
+		read: func(ctx context.Context, p *Platform, s State) map[string]string {
+			entities, err := p.haEntities(ctx, s)
+			if err != nil {
+				return nil
+			}
+			states := make(map[string]string, len(entities))
+			for _, entity := range entities {
+				states[entity.ID] = entity.State
+			}
+			return states
+		},
+	}, true
 }

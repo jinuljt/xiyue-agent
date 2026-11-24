@@ -191,6 +191,10 @@ func openPlatform(path string) (*Platform, error) {
 		if p.activity.data.Imported && !p.activity.dirty {
 			p.state.Usage = nil
 		}
+		// Normalize persisted workflows before any subsystem uses them.
+		for i := range p.state.Rules {
+			upgradeAutomationRule(&p.state.Rules[i])
+		}
 		if !p.state.HTTPExample {
 			return p, p.change(installHTTPExample)
 		}

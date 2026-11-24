@@ -477,3 +477,66 @@ func (r *roomAudio) stop(parent context.Context, p *Platform) (roomAudioStatus, 
 	defer r.mu.Unlock()
 	return r.status, nil
 }
+
+const (
+	roomStartToolID = "remote-listen.start"
+	roomStopToolID  = "remote-listen.stop"
+	roomStateID     = "remote-listen.running"
+)
+
+func roomAutomationTools(room *roomAudio) []automationToolSpec {
+	available := func(_ *State) error {
+		if !room.available() {
+			return errors.New("此设备没有可用的本地播放入口")
+		}
+		return nil
+	}
+	return []automationToolSpec{
+		{
+			ID: roomStartToolID, Name: "远程听音 · 开始",
+			Hint: "流程会连接收音设备并在音箱播放，直到手动或通过流程停止。",
+			available: func(s *State) error {
+				if err := available(s); err != nil {
+					return err
+				}
+				if s.RoomAudio == nil || s.RoomAudio.Source == "" {
+					return errors.New("请先在能力中心填写远程听音的收音地址")
+				}
+				return nil
+			},
+			run: func(p *Platform, _ map[string]string, _ time.Time) error {
+				_, err := room.start(p)
+				return err
+			},
+		},
+		{
+			ID: roomStopToolID, Name: "远程听音 · 停止", available: available,
+			run: func(p *Platform, _ map[string]string, _ time.Time) error {
+				status, err := room.stop(context.Background(), p)
+				if err == nil && status.Running {
+					return errors.New("在限定时间内未能停止听音")
+				}
+				return err
+			},
+		},
+	}
+}
+
+func roomAutomationState(room *roomAudio) automationStateSpec {
+	return automationStateSpec{
+		ID: roomStateID, Name: "远程听音 · 运行状态",
+		Options: map[string]string{"on": "已开启", "off": "已停止"}, group: "room", key: roomStateID,
+		read: func(_ context.Context, _ *Platform, _ State) map[string]string {
+			if !room.available() {
+				return nil
+			}
+			room.mu.Lock()
+			defer room.mu.Unlock()
+			value := "off"
+			if room.status.Running {
+				value = "on"
+			}
+			return map[string]string{roomStateID: value}
+		},
+	}
+}

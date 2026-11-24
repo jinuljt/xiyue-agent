@@ -29,7 +29,7 @@ func TestAutomationBindsHTTPResultAndBranches(t *testing.T) {
 	p.queueSpeech = true
 	tool := networkTool{ID: "order", Kind: "http", Method: "GET", Name: "订单", Description: "查订单", Endpoint: upstream.URL, Automation: true, Unit: "元"}
 	steps := []automationStep{
-		{Action: "http_tool", Value: tool.ID, SaveAs: "result"},
+		{Action: "tool", Value: tool.ID, SaveAs: "result"},
 		{Action: "if", Value: "result.items.0.ready", Equals: json.RawMessage("true")},
 		{Action: "speak", Value: "订单状态 {{result.items.0.status}}"},
 	}
@@ -223,5 +223,32 @@ func TestMigrationKeepsLegacyDependenciesAndHistory(t *testing.T) {
 	bytes, err := os.ReadFile(p.path)
 	if err != nil || !json.Valid(bytes) {
 		t.Fatal("migration failed to persist compatible state")
+	}
+}
+
+func TestAutomationUpgradeReadsPersistedRules(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	p, err := openPlatform(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := automationRule{
+		ID: "existing", Name: "已有规则", Trigger: "entity", Entity: "sensor", ToState: "ready", Condition: "room_off",
+		Actions: []automationStep{{Action: "room_start"}, {Action: "timer", Seconds: 10, Value: "提示"}, {Action: "http_tool", Value: "sensor"}},
+		Runs:    []automationRun{{ID: "history", Status: "completed", Actions: []string{"room_start", "timer", "http_tool"}}},
+	}
+	if err := p.change(func(s *State) error { s.Rules = []automationRule{legacy}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	p, err = openPlatform(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := p.snapshot().Rules[0]
+	if rule.ID != "existing" || rule.Trigger != "state" || rule.StateSource != "sensor" || rule.ToState != "ready" ||
+		len(rule.StateConditions) != 1 || rule.StateConditions[0] != (automationStateCondition{Source: roomStateID, Equals: "off"}) ||
+		rule.Actions[0].Value != roomStartToolID || rule.Actions[1].Value != timerToolID || rule.Actions[1].Parameters["seconds"] != "10" ||
+		rule.Actions[2].Action != "tool" || rule.Runs[0].ID != "history" {
+		t.Fatalf("rule did not survive the upgrade: %+v", rule)
 	}
 }

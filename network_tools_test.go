@@ -86,7 +86,7 @@ func TestNetworkToolsAPIAndAutomation(t *testing.T) {
 		t.Fatalf("%q %v", out, err)
 	}
 	lamp := makeTool(`{"kind":"ha","name":"灯","description":"开灯","entity":"light.test","operation":"turn_on","automation":true}`)
-	if err := p.runAutomationStep(nil, automationStep{Action: "http_tool", Value: lamp.ID}, time.Now()); err != nil {
+	if _, err := p.automationTool(nil, lamp.ID, nil, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if got := <-actions; got != `{"entity_id":"light.test"}` {

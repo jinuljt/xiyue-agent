@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -39,18 +40,25 @@ type automationRun struct {
 	Actions []string   `json:"actions,omitempty"`
 }
 
+type automationStateCondition struct {
+	Source string `json:"source"`
+	Equals string `json:"equals"`
+}
+
 type automationRule struct {
-	ID        string           `json:"id"`
-	Name      string           `json:"name"`
-	Schedule  Schedule         `json:"schedule"`
-	Condition string           `json:"condition,omitempty"`
-	Trigger   string           `json:"trigger,omitempty"`
-	Entity    string           `json:"entity_tool,omitempty"`
-	ToState   string           `json:"to_state,omitempty"`
-	After     string           `json:"after,omitempty"`
-	Before    string           `json:"before,omitempty"`
-	Actions   []automationStep `json:"actions"`
-	Runs      []automationRun  `json:"runs,omitempty"`
+	ID              string                     `json:"id"`
+	Name            string                     `json:"name"`
+	Schedule        Schedule                   `json:"schedule"`
+	Condition       string                     `json:"condition,omitempty"`
+	StateConditions []automationStateCondition `json:"state_conditions,omitempty"`
+	Trigger         string                     `json:"trigger,omitempty"`
+	Entity          string                     `json:"entity_tool,omitempty"`
+	StateSource     string                     `json:"state_source,omitempty"`
+	ToState         string                     `json:"to_state,omitempty"`
+	After           string                     `json:"after,omitempty"`
+	Before          string                     `json:"before,omitempty"`
+	Actions         []automationStep           `json:"actions"`
+	Runs            []automationRun            `json:"runs,omitempty"`
 }
 
 func (p *Platform) installRuleExamples() error {
@@ -115,7 +123,7 @@ func validateAutomation(s *State, rule automationRule) error {
 	if len(rule.Name) == 0 || len(rule.Name) > 120 || len(rule.Actions) == 0 || len(rule.Actions) > 64 {
 		return errors.New("请填写规则名称并添加 1 至 64 个动作")
 	}
-	if rule.Condition != "" && rule.Condition != "room_on" && rule.Condition != "room_off" {
+	if rule.Condition != "" || len(rule.StateConditions) > 8 {
 		return errors.New("未知执行条件")
 	}
 	if (rule.After == "") != (rule.Before == "") {
@@ -128,12 +136,20 @@ func validateAutomation(s *State, rule automationRule) error {
 			return errors.New("时间条件无效")
 		}
 	}
-	if rule.Trigger == "entity" {
-		t, ok := findNetworkTool(s, rule.Entity)
-		if !ok || !t.Automation || t.Kind != "ha" || t.Operation != "state" || rule.ToState == "" || len(rule.ToState) > 80 ||
-			rule.ToState == "unavailable" || rule.ToState == "unknown" {
-			return errors.New("请选择已授权的 Home Assistant 读取状态工具，并填写要触发的状态")
+	sources := automationStateSources(s, nil)
+	if rule.Trigger == "state" {
+		spec, ok := sources[rule.StateSource]
+		if !ok || !spec.accepts(rule.ToState) {
+			return errors.New("请选择可用的状态来源，并填写要触发的状态")
 		}
+	}
+	seen := map[string]bool{}
+	for _, condition := range rule.StateConditions {
+		spec, ok := sources[condition.Source]
+		if !ok || !spec.accepts(condition.Equals) || seen[condition.Source] {
+			return errors.New("请为每个状态条件选择不同的可用来源，并填写比较值")
+		}
+		seen[condition.Source] = true
 	}
 	variables := map[string]bool{}
 	for i, step := range rule.Actions {
@@ -146,8 +162,16 @@ func validateAutomation(s *State, rule automationRule) error {
 			return err
 		}
 		switch step.Action {
-		case "room_start", "room_stop":
-		case "http_tool":
+		case "tool":
+			if local, ok := lookupLocalAutomationTool(step.Value, nil); ok {
+				if step.SaveAs != "" {
+					return errors.New("此工具不返回可保存的结果")
+				}
+				if err := local.validate(step.Parameters, true); err != nil {
+					return err
+				}
+				continue
+			}
 			tool, ok := findNetworkTool(s, step.Value)
 			if !ok || !tool.Automation {
 				return errors.New("请选择已授权给自动化的工具")
@@ -208,10 +232,6 @@ func validateAutomation(s *State, rule automationRule) error {
 			if step.Next != 0 && (step.Next <= i+1 || step.Next > len(rule.Actions)) {
 				return errors.New("确认后只能跳到后续步骤")
 			}
-		case "timer":
-			if step.Seconds < 1 || step.Seconds > 86400 || len(step.Value) > 120 {
-				return errors.New("请检查倒计时秒数和名称")
-			}
 		case "speak":
 			if len(strings.TrimSpace(step.Value)) == 0 || len(step.Value) > 4000 {
 				return errors.New("请填写播报内容，最多 4000 字节")
@@ -231,7 +251,29 @@ func validateAutomation(s *State, rule automationRule) error {
 	return nil
 }
 
+type automationWorkflowInput struct {
+	automationRule
+	LocalTime string `json:"local_time,omitempty"`
+	Repeat    string `json:"repeat,omitempty"`
+}
+
 func (a *api) automationRoutes(m *http.ServeMux) {
+	m.HandleFunc("GET /api/automation/options", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, a.automationOptions(a.platform.snapshot()))
+	})
+	m.HandleFunc("POST /api/automation/normalize", func(w http.ResponseWriter, r *http.Request) {
+		var draft automationWorkflowInput
+		if err := decode(w, r, &draft); err != nil {
+			bad(w, err)
+			return
+		}
+		upgradeAutomationRule(&draft.automationRule)
+		if draft.Condition != "" {
+			bad(w, errors.New("无法识别流程文件中的条件"))
+			return
+		}
+		writeJSON(w, 200, draft)
+	})
 	m.HandleFunc("POST /api/automation/convert-legacy", func(w http.ResponseWriter, r *http.Request) {
 		var manifest Manifest
 		if err := decode(w, r, &manifest); err != nil {
@@ -257,25 +299,17 @@ func (a *api) automationRoutes(m *http.ServeMux) {
 		writeJSON(w, 200, map[string]any{"name": manifest.Name, "trigger": "manual", "actions": steps})
 	})
 	save := func(w http.ResponseWriter, r *http.Request) {
-		var in struct {
-			Name      string           `json:"name"`
-			LocalTime string           `json:"local_time"`
-			Repeat    string           `json:"repeat"`
-			Condition string           `json:"condition"`
-			Actions   []automationStep `json:"actions"`
-			Trigger   string           `json:"trigger"`
-			Entity    string           `json:"entity_tool"`
-			ToState   string           `json:"to_state"`
-			After     string           `json:"after"`
-			Before    string           `json:"before"`
-		}
+		var in automationWorkflowInput
 		if err := decode(w, r, &in); err != nil {
 			bad(w, err)
 			return
 		}
 		id := r.PathValue("id")
-		rule := automationRule{ID: newID(), Name: strings.TrimSpace(in.Name), Schedule: Schedule{Repeat: in.Repeat, Enabled: true}, Condition: in.Condition, Actions: in.Actions,
-			Trigger: in.Trigger, Entity: in.Entity, ToState: strings.TrimSpace(in.ToState), After: in.After, Before: in.Before}
+		rule := in.automationRule
+		rule.ID, rule.Runs = newID(), nil
+		rule.Name, rule.ToState = strings.TrimSpace(rule.Name), strings.TrimSpace(rule.ToState)
+		rule.Schedule = Schedule{Repeat: in.Repeat, Enabled: true}
+		upgradeAutomationRule(&rule)
 		err := a.platform.change(func(s *State) error {
 			if err := validateAutomation(s, rule); err != nil {
 				return err
@@ -286,7 +320,7 @@ func (a *api) automationRoutes(m *http.ServeMux) {
 				if err := setRuleTime(&rule.Schedule, in.LocalTime, s.Settings.Timezone, time.Now()); err != nil {
 					return err
 				}
-			case "manual", "entity":
+			case "manual", "state":
 				rule.Schedule.Repeat = ""
 			default:
 				return errors.New("请选择触发方式")
@@ -455,99 +489,86 @@ func (p *Platform) runAutomation(now time.Time, room *roomAudio) error {
 
 // Poll all enabled rules together. The first valid observation after startup
 // or a disconnected source establishes a baseline.
-type automationEntityBaseline struct {
-	endpoint, credential string
-	previous             map[string]string
+type automationStateBaseline struct {
+	source, target string
+	automationObservation
 }
 
-func (p *Platform) watchAutomationEntities(ctx context.Context, room *roomAudio) {
+func (p *Platform) watchAutomationStates(ctx context.Context, room *roomAudio) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
-	baseline := automationEntityBaseline{}
+	baseline := map[string]automationStateBaseline{}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := p.pollAutomationEntities(ctx, room, &baseline); err != nil {
-				log.Print("家庭设备自动化触发状态保存失败")
+			if err := p.pollAutomationStates(ctx, room, baseline); err != nil {
+				log.Print("自动化触发记录保存失败")
 			}
 		}
 	}
 }
 
-func (p *Platform) pollAutomationEntities(ctx context.Context, room *roomAudio, baseline *automationEntityBaseline) error {
+func (p *Platform) pollAutomationStates(ctx context.Context, room *roomAudio, baseline map[string]automationStateBaseline) error {
 	p.mu.Lock()
 	s := p.state
 	p.mu.Unlock()
-	credential := s.Sealed[haSecret]
-	if s.HomeAssistant != baseline.endpoint || credential != baseline.credential {
-		*baseline = automationEntityBaseline{endpoint: s.HomeAssistant, credential: credential}
-	}
-	rules := map[string]networkTool{}
+	var ids []string
 	for _, rule := range s.Rules {
-		if rule.Trigger == "entity" && rule.Schedule.Enabled {
-			if tool, ok := findNetworkTool(&s, rule.Entity); ok && tool.Automation && tool.Kind == "ha" && tool.Operation == "state" {
-				rules[rule.ID] = tool
-			}
-		}
-	}
-	if len(rules) == 0 {
-		baseline.previous = nil
-		return nil
-	}
-	entities, err := p.haEntities(ctx, s)
-	if err != nil {
-		baseline.previous = nil
-		return nil
-	}
-	states := make(map[string]string, len(entities))
-	for _, entity := range entities {
-		if entity.State != "unknown" && entity.State != "unavailable" && entity.State != "" {
-			states[entity.ID] = entity.State
+		if rule.Trigger == "state" && rule.Schedule.Enabled {
+			ids = append(ids, rule.StateSource)
+			ids = append(ids, automationConditionSources(rule)...)
 		}
 	}
 	now := time.Now().UTC()
-	current := map[string]string{}
+	observations := p.observeAutomationStates(ctx, s, room, ids)
+	current := map[string]automationStateBaseline{}
 	var failure error
 	for _, rule := range s.Rules {
-		tool, ok := rules[rule.ID]
-		if !ok {
+		observation, ok := observations[rule.StateSource]
+		if !ok || rule.Trigger != "state" || !rule.Schedule.Enabled {
 			continue
 		}
-		key := rule.ID + "|" + tool.Entity + "|" + rule.ToState
-		value := states[tool.Entity]
-		if value != "" {
-			current[key] = value
+		next := automationStateBaseline{rule.StateSource, rule.ToState, observation}
+		current[rule.ID] = next
+		last, seen := baseline[rule.ID]
+		if !seen || last.source != next.source || last.target != next.target || last.identity != next.identity ||
+			last.value == next.value || next.value != rule.ToState {
+			continue
 		}
-		if old, seen := baseline.previous[key]; seen && old != value && value == rule.ToState {
-			if err := p.startAutomationIf(now, room, rule.ID, "entity", func(next *State, latest automationRule) bool {
-				authorized, ok := findNetworkTool(next, latest.Entity)
-				return ok && authorized.Automation && authorized.Kind == "ha" && authorized.Operation == "state" &&
-					authorized.Entity == tool.Entity && latest.ToState == rule.ToState && next.HomeAssistant == s.HomeAssistant &&
-					next.Sealed[haSecret] == credential
-			}); err != nil {
-				current[key] = old
-				failure = err
-			}
+		if err := p.startAutomationObserved(now, rule.ID, "state", observations, &next); err != nil {
+			current[rule.ID] = last
+			failure = err
 		}
 	}
-	baseline.previous = current
+	clear(baseline)
+	maps.Copy(baseline, current)
 	return failure
 }
 
-func (p *Platform) startAutomation(now time.Time, room *roomAudio, id, source string) error {
-	return p.startAutomationIf(now, room, id, source, nil)
+func automationConditionSources(rule automationRule) []string {
+	var ids []string
+	for _, condition := range rule.StateConditions {
+		ids = append(ids, condition.Source)
+	}
+	return ids
 }
 
-func (p *Platform) startAutomationIf(now time.Time, room *roomAudio, id, source string, matches func(*State, automationRule) bool) error {
-	run := automationRun{ID: newID(), At: now, Source: source, Status: "running", Step: 1}
-	roomOn := false
-	if room != nil {
-		room.mu.Lock()
-		roomOn = room.status.Running
-		room.mu.Unlock()
+func (p *Platform) startAutomation(now time.Time, room *roomAudio, id, source string) error {
+	p.mu.Lock()
+	s := p.state
+	p.mu.Unlock()
+	var ids []string
+	if index := slices.IndexFunc(s.Rules, func(rule automationRule) bool { return rule.ID == id }); index >= 0 {
+		ids = automationConditionSources(s.Rules[index])
 	}
+	observations := p.observeAutomationStates(context.Background(), s, room, ids)
+	return p.startAutomationObserved(now, id, source, observations, nil)
+}
+
+func (p *Platform) startAutomationObserved(now time.Time, id, source string, observations map[string]automationObservation, trigger *automationStateBaseline) error {
+	run := automationRun{ID: newID(), At: now, Source: source, Status: "running", Step: 1}
 	err := p.change(func(s *State) error {
 		for i := range s.Rules {
 			rule := &s.Rules[i]
@@ -563,8 +584,13 @@ func (p *Platform) startAutomationIf(now time.Time, room *roomAudio, id, source 
 			if source == "manual" && !rule.Schedule.Enabled && !isScheduledAutomation(*rule) {
 				return errors.New("请先启用此流程")
 			}
-			if source == "entity" && (rule.Trigger != "entity" || !rule.Schedule.Enabled || matches == nil || !matches(s, *rule)) {
-				return errNoVoiceChange
+			sources := automationStateSources(s, nil)
+			if trigger != nil {
+				spec, ok := sources[rule.StateSource]
+				if rule.Trigger != "state" || !rule.Schedule.Enabled || !ok ||
+					trigger.source != rule.StateSource || trigger.target != rule.ToState || trigger.identity != spec.identity {
+					return errNoVoiceChange
+				}
 			}
 			if source == "scheduled" {
 				if !isScheduledAutomation(*rule) || !scheduleDue(rule.Schedule, now) {
@@ -583,14 +609,22 @@ func (p *Platform) startAutomationIf(now time.Time, room *roomAudio, id, source 
 					rule.Schedule.NextAt = next
 				}
 			}
-			if run.Status == "running" && !automationConditions(*rule, s.Settings.Timezone, now, roomOn) {
+			if run.Status == "running" && !automationConditions(*rule, s.Settings.Timezone, now, sources, observations) {
 				run.Status, run.Error = "skipped", "当前不满足执行条件"
 			}
 			if run.Status == "skipped" {
 				run.Step = 0
 			}
 			for _, step := range rule.Actions {
-				run.Actions = append(run.Actions, step.Action)
+				label := step.Action
+				if step.Action == "tool" {
+					if local, ok := lookupLocalAutomationTool(step.Value, nil); ok {
+						label = local.Name
+					} else if tool, ok := findNetworkTool(s, step.Value); ok {
+						label = tool.Name
+					}
+				}
+				run.Actions = append(run.Actions, label)
 			}
 			rule.Runs = append([]automationRun{run}, rule.Runs[:min(12, len(rule.Runs))]...)
 			return nil
@@ -606,9 +640,13 @@ func (p *Platform) startAutomationIf(now time.Time, room *roomAudio, id, source 
 	return err
 }
 
-func automationConditions(rule automationRule, tz string, now time.Time, roomOn bool) bool {
-	if (rule.Condition == "room_on" && !roomOn) || (rule.Condition == "room_off" && roomOn) {
-		return false
+func automationConditions(rule automationRule, tz string, now time.Time, sources map[string]automationStateSpec, observations map[string]automationObservation) bool {
+	for _, condition := range rule.StateConditions {
+		observation, ok := observations[condition.Source]
+		spec, available := sources[condition.Source]
+		if !ok || !available || spec.identity != observation.identity || observation.value != condition.Equals {
+			return false
+		}
 	}
 	if rule.After == "" {
 		return true
@@ -807,7 +845,7 @@ func (p *Platform) advanceAutomation(now time.Time, room *roomAudio, id string) 
 		}
 		run.Phase = "action"
 		var result networkToolResult
-		if step.Action == "http_tool" {
+		if step.Action == "tool" {
 			args := make(map[string]string, len(step.Parameters))
 			for key, value := range step.Parameters {
 				args[key], err = expandAutomationText(value, values)
@@ -815,7 +853,7 @@ func (p *Platform) advanceAutomation(now time.Time, room *roomAudio, id string) 
 					return fail(err)
 				}
 			}
-			result, err = p.automationTool(step.Value, args)
+			result, err = p.automationTool(room, step.Value, args, now)
 			if err == nil && step.SaveAs != "" {
 				size := len(result.Value)
 				for _, existing := range values {
@@ -826,7 +864,7 @@ func (p *Platform) advanceAutomation(now time.Time, room *roomAudio, id string) 
 				}
 			}
 		} else {
-			err = p.runAutomationStep(room, step, now)
+			err = errors.New("未知自动化动作")
 		}
 		updateErr := update(func(_ *State, live *automationRun) error {
 			if err != nil {
@@ -834,12 +872,6 @@ func (p *Platform) advanceAutomation(now time.Time, room *roomAudio, id string) 
 				live.Results = append(live.Results, "执行失败")
 			} else {
 				result := "已执行"
-				if step.Action == "timer" {
-					result = "已创建响铃倒计时"
-				}
-				if step.Action == "room_start" {
-					result = "已请求连接音源"
-				}
 				if step.SaveAs != "" {
 					result = "已保存变量 " + step.SaveAs
 				}
@@ -847,7 +879,7 @@ func (p *Platform) advanceAutomation(now time.Time, room *roomAudio, id string) 
 			}
 			return nil
 		})
-		if updateErr == nil && err == nil && step.Action == "http_tool" && step.SaveAs != "" {
+		if updateErr == nil && err == nil && step.Action == "tool" && step.SaveAs != "" {
 			if p.automationValues == nil {
 				p.automationValues = map[string]map[string]json.RawMessage{}
 			}
@@ -909,37 +941,28 @@ func (p *Platform) automationVoiceConfirmation(text string, now time.Time) (voic
 	return voiceTaskReply{handled: true, text: "继续。"}, err
 }
 
-func (p *Platform) automationTool(id string, args map[string]string) (networkToolResult, error) {
+func automationUsesTool(s *State, id string) bool {
+	return slices.ContainsFunc(s.Rules, func(rule automationRule) bool {
+		return (rule.Trigger == "state" && rule.StateSource == id) ||
+			slices.ContainsFunc(rule.StateConditions, func(condition automationStateCondition) bool { return condition.Source == id }) ||
+			slices.ContainsFunc(rule.Actions, func(step automationStep) bool { return step.Action == "tool" && step.Value == id })
+	})
+}
+
+func (p *Platform) automationTool(room *roomAudio, id string, args map[string]string, now time.Time) (networkToolResult, error) {
 	s := p.snapshot()
+	if local, ok := lookupLocalAutomationTool(id, room); ok {
+		if err := local.validate(args, false); err != nil {
+			return networkToolResult{}, err
+		}
+		if err := local.available(&s); err != nil {
+			return networkToolResult{}, err
+		}
+		return networkToolResult{}, local.run(p, args, now)
+	}
 	tool, ok := findNetworkTool(&s, id)
 	if !ok || !tool.Automation {
 		return networkToolResult{}, errors.New("该工具已停用或撤销自动化授权")
 	}
 	return p.networkToolValue(context.Background(), s, tool, args)
-}
-
-func (p *Platform) runAutomationStep(room *roomAudio, action automationStep, now time.Time) error {
-	switch action.Action {
-	case "http_tool":
-		_, err := p.automationTool(action.Value, action.Parameters)
-		return err
-	case "room_start":
-		_, err := room.start(p)
-		return err
-	case "room_stop":
-		if status, err := room.stop(context.Background(), p); err != nil {
-			return err
-		} else if status.Running {
-			return errors.New("在限定时间内未能停止听音")
-		}
-		return nil
-	case "timer":
-		name := "计时结束。"
-		if action.Value != "" {
-			name = action.Value + "，计时结束。"
-		}
-		return p.scheduleVoiceTask(quickTimer.ID, name, time.Duration(action.Seconds)*time.Second, now)
-	default:
-		return errors.New("未知自动化动作")
-	}
 }

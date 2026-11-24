@@ -108,7 +108,10 @@ func defaultSettings() SystemConfig {
 	return SystemConfig{Revision: 1, Name: "喜悦音箱", WakeWord: "喜悦", Timezone: "Asia/Shanghai", Mode: "direct", ReplyLanguage: "zh", LLM: ServiceConfig{Provider: "deepseek", Endpoint: "https://api.deepseek.com", Model: "deepseek-flash"}, ASR: ServiceConfig{Provider: "doubao"}, TTS: ServiceConfig{Provider: "system"}, External: ServiceConfig{Provider: "http_json"}}
 }
 func (p *Platform) publicState() State {
-	s := p.snapshot()
+	return p.snapshot().publicFields()
+}
+
+func (s State) publicFields() State {
 	s.Sealed = nil
 	s.Owner = nil
 	s.ExternalTasks = nil
@@ -595,6 +598,37 @@ type serviceUse struct {
 	CurrentConfig bool      `json:"current_config"`
 }
 
+func llmConfigured(config ServiceConfig) bool {
+	return config.Endpoint != "" && config.Model != "" &&
+		(config.KeyConfigured || strings.HasPrefix(config.Provider, "custom"))
+}
+
+func (a *api) setupStage(s State) string {
+	config := s.Settings
+	device := a.voice != nil
+	if (device && config.DeviceSetupComplete) || (!device && config.SetupComplete) {
+		return ""
+	}
+	if device {
+		if !asrReady(config.ASR) {
+			return "configure_asr"
+		}
+		if !ttsReady(a.voice, s) {
+			return "configure_tts"
+		}
+	}
+	if config.Mode != "direct" && config.External.Endpoint == "" {
+		return "configure_external"
+	}
+	if config.Mode != "external" && (!llmConfigured(config.LLM) || config.UpdatedAt == nil) {
+		return "configure"
+	}
+	if device {
+		return "verify_device"
+	}
+	return "verify"
+}
+
 func (a *api) serviceStatus(s State) map[string]serviceStatus {
 	config := s.Settings
 	status := func(provider string, ready bool) serviceStatus {
@@ -605,10 +639,9 @@ func (a *api) serviceStatus(s State) map[string]serviceStatus {
 		return serviceStatus{Provider: provider, State: state}
 	}
 	services := map[string]serviceStatus{
-		"asr": status(config.ASR.Provider, asrReady(config.ASR)),
-		"tts": status(config.TTS.Provider, ttsReady(a.voice, s)),
-		"llm": status(config.LLM.Provider, config.LLM.Endpoint != "" && config.LLM.Model != "" &&
-			(config.LLM.KeyConfigured || strings.HasPrefix(config.LLM.Provider, "custom"))),
+		"asr":      status(config.ASR.Provider, asrReady(config.ASR)),
+		"tts":      status(config.TTS.Provider, ttsReady(a.voice, s)),
+		"llm":      status(config.LLM.Provider, llmConfigured(config.LLM)),
 		"external": status(config.External.Provider, config.External.Endpoint != ""),
 	}
 	if a.voice == nil {
@@ -772,6 +805,7 @@ func (a *api) runtimeStatus(s State, detail bool) map[string]any {
 		"uptime_seconds":  int(time.Since(bootTime).Seconds()),
 		"platform":        runtime.GOOS + "/" + runtime.GOARCH,
 		"config_revision": s.Settings.Revision,
+		"setup_stage":     a.setupStage(s),
 		"device": map[string]string{"model": a.deviceModel, "firmware": a.deviceFirmware,
 			"name": map[string]string{"OH2P": "Xiaomi 智能音箱 Pro"}[strings.ToUpper(a.deviceModel)]},
 		"voice": a.voice.status(),
