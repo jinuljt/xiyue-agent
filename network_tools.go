@@ -239,7 +239,12 @@ type haEntity struct {
 	} `json:"attributes"`
 }
 
-func (p *Platform) haEntities(ctx context.Context, s State) ([]haEntity, error) {
+type haEntityState struct {
+	haEntity
+	State string `json:"state"`
+}
+
+func (p *Platform) haEntities(ctx context.Context, s State) ([]haEntityState, error) {
 	key, err := p.networkKey(s, haSecret)
 	if err != nil {
 		return nil, err
@@ -251,11 +256,11 @@ func (p *Platform) haEntities(ctx context.Context, s State) ([]haEntity, error) 
 	if err != nil {
 		return nil, err
 	}
-	entities := []haEntity{}
+	entities := []haEntityState{}
 	if json.Unmarshal(data, &entities) != nil {
 		return nil, errors.New("Home Assistant 实体列表格式异常")
 	}
-	entities = slices.DeleteFunc(entities, func(e haEntity) bool { return len(e.ID) > 128 || !entityID.MatchString(e.ID) })
+	entities = slices.DeleteFunc(entities, func(e haEntityState) bool { return len(e.ID) > 128 || !entityID.MatchString(e.ID) })
 	for i := range entities {
 		entities[i].Attributes.Name = boundedText(entities[i].Attributes.Name, 100)
 	}
@@ -357,7 +362,11 @@ func (a *api) networkToolRoutes(m *http.ServeMux) {
 			bad(w, err)
 			return
 		}
-		writeJSON(w, 200, res)
+		items := make([]haEntity, 0, len(res))
+		for _, entity := range res {
+			items = append(items, entity.haEntity)
+		}
+		writeJSON(w, 200, items)
 	})
 	build := func(in networkInput, id string) (networkTool, error) {
 		t := in.networkTool
@@ -399,7 +408,7 @@ func (a *api) networkToolRoutes(m *http.ServeMux) {
 				bad(w, err)
 				return
 			}
-			if !slices.ContainsFunc(entities, func(e haEntity) bool { return e.ID == t.Entity }) {
+			if !slices.ContainsFunc(entities, func(e haEntityState) bool { return e.ID == t.Entity }) {
 				bad(w, errors.New("该实体已不存在"))
 				return
 			}

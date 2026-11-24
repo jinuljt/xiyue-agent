@@ -560,6 +560,9 @@ func main() {
 		defer input.Close()
 		go readAlarmButton(input, voice.stopAlarm)
 	}
+	if err := p.recoverAutomation(); err != nil {
+		log.Fatal("无法恢复自动化运行记录")
+	}
 	if voice != nil {
 		p.queueSpeech = true
 		if err := p.recoverDeliveries(); err != nil {
@@ -633,9 +636,10 @@ func main() {
 		}
 	}
 	room := newRoomAudio(ctx, speaker)
-	if err := p.recoverAutomation(); err != nil {
-		log.Fatal("无法恢复自动化运行记录")
+	if err := room.restore(p); err != nil {
+		log.Print("远程听音配置未能恢复，请在控制台检查")
 	}
+	go p.watchAutomationEntities(ctx, room)
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()

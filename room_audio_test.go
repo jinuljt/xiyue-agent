@@ -184,6 +184,9 @@ func TestRoomAudioLifecycleAndPriority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if reopened.snapshot().RoomListening {
+		t.Fatal("manual stop should survive restart")
+	}
 	if config := reopened.roomConfig(); config.Source != fixtureAddress || config.Volume != 70 {
 		t.Fatalf("config was not restored: %+v", config)
 	}
@@ -200,8 +203,34 @@ func TestRoomAudioLifecycleAndPriority(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("draft did not start playback")
 	}
-	request("POST", "/stop", "{}", 200)
-	if config := p.roomConfig(); config.Name != "" || config.Volume != 70 {
-		t.Fatal("starting playback changed saved configuration")
+	afterStart, err := openPlatform(p.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config := afterStart.roomConfig(); !afterStart.snapshot().RoomListening || config.Name != "temporary" || config.Volume != 35 {
+		t.Fatal("starting playback should persist the active configuration")
+	}
+	room.mu.Lock()
+	done := room.done
+	room.mu.Unlock()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old listening session did not stop on shutdown")
+	}
+	resumed := newRoomAudio(context.Background(), v)
+	resumed.client = room.client
+	defer resumed.stop(context.Background(), afterStart)
+	if err := resumed.restore(afterStart); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case sample := <-played:
+		if sample != 35 {
+			t.Fatalf("restored volume produced sample %d", sample)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("listening did not resume from saved configuration")
 	}
 }

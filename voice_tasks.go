@@ -94,6 +94,9 @@ func (p *Platform) confirmQuestion(question Event, now time.Time) (voiceTaskRepl
 
 func (p *Platform) voiceTask(text string, now time.Time) (voiceTaskReply, error) {
 	text = strings.TrimRight(strings.TrimSpace(text), "。！？.!? ")
+	if reply, err := p.automationVoiceConfirmation(text, now); reply.handled || err != nil {
+		return reply, err
+	}
 	if text == "继续下一步" || text == "完成当前任务" {
 		reply := voiceTaskReply{text: "继续。", handled: true}
 		err := p.change(func(s *State) error {

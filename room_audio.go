@@ -245,6 +245,30 @@ func (p *Platform) roomConfig() roomAudioConfig {
 	return *p.state.RoomAudio
 }
 
+func (p *Platform) saveRoomConfig(s *State, c roomAudioConfig, supplied string) error {
+	password, err := p.roomPassword(*s, c, supplied)
+	if err != nil {
+		return err
+	}
+	if c.Username == "" {
+		delete(s.Sealed, roomPasswordKey)
+	} else if supplied != "" {
+		sealed, err := p.seal(roomPasswordKey, password)
+		if err != nil {
+			return err
+		}
+		if s.Sealed == nil {
+			s.Sealed = map[string]string{}
+		}
+		s.Sealed[roomPasswordKey] = sealed
+	}
+	s.RoomAudio = &c
+	if c.Source == "" {
+		s.RoomListening = false
+	}
+	return nil
+}
+
 func (r *roomAudio) available() bool {
 	return r != nil && r.voice != nil && r.voice.playPCM != nil
 }
@@ -259,7 +283,7 @@ func (a *api) roomAudioRoutes(m *http.ServeMux) {
 		}
 		s := a.platform.snapshot()
 		writeJSON(w, 200, map[string]any{"available": a.room.available(), "config": a.platform.roomConfig(), "status": status,
-			"password_configured": s.Sealed[roomPasswordKey] != ""})
+			"listening": s.RoomListening, "password_configured": s.Sealed[roomPasswordKey] != ""})
 	})
 	m.HandleFunc("PUT /api/room-audio", func(w http.ResponseWriter, req *http.Request) {
 		var in roomAudioInput
@@ -281,24 +305,7 @@ func (a *api) roomAudioRoutes(m *http.ServeMux) {
 			}
 		}
 		if err := a.platform.change(func(s *State) error {
-			password, err := a.platform.roomPassword(*s, c, in.Password)
-			if err != nil {
-				return err
-			}
-			if c.Username == "" {
-				delete(s.Sealed, roomPasswordKey)
-			} else if in.Password != "" {
-				sealed, err := a.platform.seal(roomPasswordKey, password)
-				if err != nil {
-					return err
-				}
-				if s.Sealed == nil {
-					s.Sealed = map[string]string{}
-				}
-				s.Sealed[roomPasswordKey] = sealed
-			}
-			s.RoomAudio = &c
-			return nil
+			return a.platform.saveRoomConfig(s, c, in.Password)
 		}); err != nil {
 			bad(w, err)
 			return
@@ -362,8 +369,24 @@ func (a *api) roomAudioRoutes(m *http.ServeMux) {
 		writeJSON(w, 200, status)
 	})
 	m.HandleFunc("POST /api/room-audio/stop", func(w http.ResponseWriter, req *http.Request) {
-		writeJSON(w, 200, a.room.stop(req.Context()))
+		status, err := a.room.stop(req.Context(), a.platform)
+		if err != nil {
+			bad(w, err)
+			return
+		}
+		writeJSON(w, 200, status)
 	})
+}
+
+func (r *roomAudio) restore(p *Platform) error {
+	p.mu.Lock()
+	active := p.state.RoomListening
+	p.mu.Unlock()
+	if !active || !r.available() {
+		return nil
+	}
+	_, err := r.start(p)
+	return err
 }
 
 func (r *roomAudio) start(p *Platform) (roomAudioStatus, error) {
@@ -378,6 +401,9 @@ func (r *roomAudio) startWithConfig(p *Platform, draft *roomAudioInput) (roomAud
 	defer r.mu.Unlock()
 	if r.status.Stage == "stopping" {
 		return r.status, errors.New("听音正在停止")
+	}
+	if r.cancel != nil && draft != nil {
+		return r.status, errors.New("请先停止听音，再修改配置")
 	}
 	if r.cancel == nil {
 		s := p.snapshot()
@@ -396,6 +422,19 @@ func (r *roomAudio) startWithConfig(p *Platform, draft *roomAudioInput) (roomAud
 		if err != nil {
 			return r.status, err
 		}
+		if draft != nil || !s.RoomListening {
+			if err := p.change(func(next *State) error {
+				if draft != nil {
+					if err := p.saveRoomConfig(next, c, temporary); err != nil {
+						return err
+					}
+				}
+				next.RoomListening = true
+				return nil
+			}); err != nil {
+				return r.status, err
+			}
+		}
 		ctx, cancel := context.WithCancel(r.parent)
 		r.cancel, r.done = cancel, make(chan struct{})
 		r.status = roomAudioStatus{Name: c.Name, Running: true, Stage: "connecting"}
@@ -404,11 +443,22 @@ func (r *roomAudio) startWithConfig(p *Platform, draft *roomAudioInput) (roomAud
 	return r.status, nil
 }
 
-func (r *roomAudio) stop(parent context.Context) roomAudioStatus {
+func (r *roomAudio) stop(parent context.Context, p *Platform) (roomAudioStatus, error) {
 	if r == nil {
-		return roomAudioStatus{Stage: "stopped"}
+		return roomAudioStatus{Stage: "stopped"}, errors.New("远程听音不可用")
 	}
 	r.mu.Lock()
+	if err := p.change(func(s *State) error {
+		if !s.RoomListening {
+			return errNoVoiceChange
+		}
+		s.RoomListening = false
+		return nil
+	}); err != nil && !errors.Is(err, errNoVoiceChange) {
+		status := r.status
+		r.mu.Unlock()
+		return status, err
+	}
 	done := r.done
 	if r.cancel != nil {
 		r.status.Stage = "stopping"
@@ -425,5 +475,5 @@ func (r *roomAudio) stop(parent context.Context) roomAudioStatus {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.status
+	return r.status, nil
 }

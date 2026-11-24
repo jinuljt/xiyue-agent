@@ -83,6 +83,7 @@ type State struct {
 	HTTPTools     []networkTool     `json:"http_tools,omitempty"`
 	Features      map[string]bool   `json:"features,omitempty"`
 	Rules         []automationRule  `json:"rules,omitempty"`
+	RoomListening bool              `json:"room_listening,omitempty"`
 	RoomAudio     *roomAudioConfig  `json:"room_audio,omitempty"`
 	ExternalTasks []externalTaskRef `json:"external_tasks,omitempty"`
 	queueSpeech   bool
