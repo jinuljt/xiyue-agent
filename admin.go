@@ -218,25 +218,30 @@ func (a *api) changeOwnerPassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"authenticated": true})
 }
 
+func (a *api) sessionStatus(r *http.Request) map[string]bool {
+	required := a.admin != nil
+	a.platform.mu.Lock()
+	owner := a.platform.state.Owner
+	configured := owner != nil && len(owner.PasswordHash) == 32
+	asr := a.platform.state.Settings.ASR
+	a.platform.mu.Unlock()
+	status := map[string]bool{"required": required, "authenticated": !required || a.platform.authenticated(r),
+		"configured": configured}
+	if required && !configured {
+		status["setup_available"] = sameSetupNetwork(r)
+	}
+	if g := a.admin; g != nil && configured {
+		g.mu.Lock()
+		status["device_button"] = g.buttonReady
+		status["device_voice"] = g.voiceLogin && asrReady(asr)
+		g.mu.Unlock()
+	}
+	return status
+}
+
 func (a *api) adminRoutes(m *http.ServeMux) {
 	m.HandleFunc("GET /api/session", func(w http.ResponseWriter, r *http.Request) {
-		required := a.admin != nil
-		a.platform.mu.Lock()
-		owner := a.platform.state.Owner
-		configured := owner != nil && len(owner.PasswordHash) == 32
-		a.platform.mu.Unlock()
-		status := map[string]bool{"required": required, "authenticated": !required || a.platform.authenticated(r),
-			"configured": configured}
-		if required && !configured {
-			status["setup_available"] = sameSetupNetwork(r)
-		}
-		if g := a.admin; g != nil && configured {
-			g.mu.Lock()
-			status["device_button"] = g.buttonReady
-			status["device_voice"] = g.voiceLogin && asrReady(a.platform.snapshot().Settings.ASR)
-			g.mu.Unlock()
-		}
-		writeJSON(w, 200, status)
+		writeJSON(w, 200, a.sessionStatus(r))
 	})
 	m.HandleFunc("POST /api/session/device", a.deviceLoginAction)
 	m.HandleFunc("POST /api/session/device/claim", a.deviceLoginAction)

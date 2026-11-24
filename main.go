@@ -66,6 +66,7 @@ func (a *api) routes() http.Handler {
 	a.adminRoutes(m)
 	a.externalTaskRoutes(m)
 	a.activityRoutes(m)
+	m.HandleFunc("GET /api/console", a.consoleSnapshot)
 	m.HandleFunc("GET /api/state", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, a.platform.publicState()) })
 	m.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		s := a.platform.publicState()
@@ -364,7 +365,7 @@ func (a *api) guard(next http.Handler) http.Handler {
 				// Real capture arrives on the local, owner-only wake socket.
 				http.NotFound(w, r)
 				return
-			case r.Method == http.MethodGet && r.URL.Path == "/api/session":
+			case r.Method == http.MethodGet && (r.URL.Path == "/api/session" || r.URL.Path == "/api/console"):
 			case r.Method == http.MethodPost && (r.URL.Path == "/api/session/login" || r.URL.Path == "/api/session/setup" ||
 				r.URL.Path == "/api/session/device" || r.URL.Path == "/api/session/device/claim"):
 			case r.Method == http.MethodDelete && r.URL.Path == "/api/session/device":
@@ -375,6 +376,27 @@ func (a *api) guard(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (a *api) consoleSnapshot(w http.ResponseWriter, r *http.Request) {
+	session := a.sessionStatus(r)
+	payload := map[string]any{"session": session}
+	if session["authenticated"] {
+		s := a.platform.publicState()
+		q := r.URL.Query()
+		view := q.Get("view")
+		payload["state"] = s
+		payload["status"] = a.runtimeStatus(s, view == "device-status")
+		payload["practice_available"] = s.Settings.supportsPractice(s.Settings.practiceLanguage())
+		if view == "home" {
+			payload["usage"] = a.platform.activity.usageSummary(s.Settings.Timezone)
+		}
+		if view == "system" && q.Get("catalog") == "1" {
+			payload["providers"] = providers()
+			payload["languages"] = languageOptions
+		}
+	}
+	writeJSON(w, 200, payload)
 }
 
 func main() {

@@ -762,17 +762,26 @@ func (a *api) settingsRoutes(m *http.ServeMux) {
 		writeJSON(w, 200, map[string]any{"ok": true, "duration_ms": time.Since(start).Milliseconds()})
 	})
 	m.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
-		s := a.platform.publicState()
+		writeJSON(w, 200, a.runtimeStatus(a.platform.publicState(), true))
+	})
+}
+
+func (a *api) runtimeStatus(s State, detail bool) map[string]any {
+	result := map[string]any{
+		"version":         "0.2.0",
+		"uptime_seconds":  int(time.Since(bootTime).Seconds()),
+		"platform":        runtime.GOOS + "/" + runtime.GOARCH,
+		"config_revision": s.Settings.Revision,
+		"device": map[string]string{"model": a.deviceModel, "firmware": a.deviceFirmware,
+			"name": map[string]string{"OH2P": "Xiaomi 智能音箱 Pro"}[strings.ToUpper(a.deviceModel)]},
+		"voice": a.voice.status(),
+	}
+	if detail {
 		s.Usage = a.platform.activity.recent()
 		var mem runtime.MemStats
 		runtime.ReadMemStats(&mem)
-		writeJSON(w, 200, map[string]any{
-			"version":        "0.2.0",
-			"uptime_seconds": int(time.Since(bootTime).Seconds()), "memory_bytes": mem.Alloc,
-			"platform": runtime.GOOS + "/" + runtime.GOARCH, "config_revision": s.Settings.Revision,
-			"device": map[string]string{"model": a.deviceModel, "firmware": a.deviceFirmware,
-				"name": map[string]string{"OH2P": "Xiaomi 智能音箱 Pro"}[strings.ToUpper(a.deviceModel)]},
-			"services": a.serviceStatus(s), "voice": a.voice.status(),
-		})
-	})
+		result["memory_bytes"] = mem.Alloc
+		result["services"] = a.serviceStatus(s)
+	}
+	return result
 }

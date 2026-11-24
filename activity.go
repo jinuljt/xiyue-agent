@@ -382,36 +382,44 @@ func (a *activityStore) dialogue(text, reply string, timing voiceResult) {
 var activityCurrency = regexp.MustCompile(`^[A-Z]{3}$`)
 var sensitiveDialogue = regexp.MustCompile(`(?i)确认登录|登录口令|验证码|密码|访问令牌|api[ _-]*key|bearer[[:space:]]|sk-[a-z0-9_-]{12,}|-----BEGIN [A-Z ]*PRIVATE KEY-----`)
 
+func (store *activityStore) usageSummary(timezone string) map[string]any {
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	today := time.Now().In(loc).Format(time.DateOnly)
+	month := today[:7]
+	var calls, missing int64
+	totals := map[string]float64{}
+	store.mu.Lock()
+	if store.loadErr != nil {
+		store.mu.Unlock()
+		return nil
+	}
+	for _, row := range store.data.Daily {
+		if row.Day == today {
+			calls += row.Calls
+		}
+		if row.Day <= today && strings.HasPrefix(row.Day, month) {
+			missing += row.Calls - row.KnownCost
+			if row.KnownCost > 0 {
+				totals[row.Currency] += row.Estimated
+			}
+		}
+	}
+	store.mu.Unlock()
+	return map[string]any{"today_calls": calls, "month_unpriced": missing, "month_costs": totals}
+}
+
 func (a *api) activityRoutes(m *http.ServeMux) {
 	store := a.platform.activity
 	m.HandleFunc("GET /api/usage/summary", func(w http.ResponseWriter, r *http.Request) {
-		loc, err := time.LoadLocation(a.platform.snapshot().Settings.Timezone)
-		if err != nil {
-			loc = time.UTC
-		}
-		today := time.Now().In(loc).Format(time.DateOnly)
-		month := today[:7]
-		var calls, missing int64
-		totals := map[string]float64{}
-		store.mu.Lock()
-		if store.loadErr != nil {
-			store.mu.Unlock()
+		summary := store.usageSummary(a.platform.snapshot().Settings.Timezone)
+		if summary == nil {
 			writeJSON(w, 503, map[string]string{"error": "用量记录暂不可读"})
 			return
 		}
-		for _, row := range store.data.Daily {
-			if row.Day == today {
-				calls += row.Calls
-			}
-			if row.Day <= today && strings.HasPrefix(row.Day, month) {
-				missing += row.Calls - row.KnownCost
-				if row.KnownCost > 0 {
-					totals[row.Currency] += row.Estimated
-				}
-			}
-		}
-		store.mu.Unlock()
-		writeJSON(w, 200, map[string]any{"today_calls": calls, "month_unpriced": missing, "month_costs": totals})
+		writeJSON(w, 200, summary)
 	})
 	m.HandleFunc("GET /api/usage", func(w http.ResponseWriter, r *http.Request) {
 		days, offset := activityPage(r)

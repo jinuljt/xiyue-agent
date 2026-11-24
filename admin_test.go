@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -64,6 +65,14 @@ func TestInstallerSetsAdministratorOnceAndLoginSurvivesRestart(t *testing.T) {
 	if w := call("GET", "/api/state", "", "", nil); w.Code != 401 {
 		t.Fatalf("anonymous state got %d", w.Code)
 	}
+	for _, view := range []string{"home", "system&catalog=1", "device-status"} {
+		w := call("GET", "/api/console?view="+view, "", "", nil)
+		body := w.Body.String()
+		if w.Code != 200 || !strings.Contains(body, `"authenticated":false`) ||
+			strings.Contains(body, `"state":`) || strings.Contains(body, `"status":`) || strings.Contains(body, `"providers":`) || strings.Contains(body, `"usage":`) {
+			t.Fatalf("unauthenticated console exposed data for %q: %s", view, body)
+		}
+	}
 	if w := call("POST", "/api/session/pair", "https://"+host, account, nil); w.Code != 401 {
 		t.Fatalf("old network account setup route got %d", w.Code)
 	}
@@ -76,6 +85,22 @@ func TestInstallerSetsAdministratorOnceAndLoginSurvivesRestart(t *testing.T) {
 		t.Fatalf("valid login got %d", w.Code)
 	}
 	cookie := cookies[0]
+	for _, item := range []struct{ query, include, exclude string }{
+		{"home", "usage", "providers"},
+		{"system&catalog=1", "providers", "usage"},
+		{"system", "state", "providers"},
+		{"device-status", "status", "usage"},
+	} {
+		w := call("GET", "/api/console?view="+item.query, "", "", cookie)
+		var frame map[string]json.RawMessage
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &frame) != nil || frame[item.include] == nil || frame[item.exclude] != nil ||
+			strings.Contains(w.Body.String(), `"password_hash":`) || strings.Contains(w.Body.String(), digest(cookie.Value)) {
+			t.Fatalf("unexpected authenticated console response for %q", item.query)
+		}
+		if item.query == "device-status" && !strings.Contains(string(frame["status"]), `"memory_bytes":`) {
+			t.Fatal("missing device diagnostics")
+		}
+	}
 	reloaded, err := openPlatform(path)
 	if err != nil {
 		t.Fatal(err)
