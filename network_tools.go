@@ -51,6 +51,25 @@ func findNetworkTool(s *State, id string) (networkTool, bool) {
 	}
 	return s.HTTPTools[i], true
 }
+func installHTTPExample(s *State) error {
+	s.HTTPExample = true
+	if len(s.HTTPTools) >= 32 {
+		return nil
+	}
+	example := networkTool{
+		ID: "net_example", Kind: "http", Method: http.MethodGet,
+		Name:        "HTTP 测试工具",
+		Description: "向 Postman Echo 发送固定示例参数，读取返回值。",
+		Endpoint:    "https://postman-echo.com/get?message=hello",
+		Extract:     "args.message",
+	}
+	if err := example.validate(); err != nil {
+		return err
+	}
+	s.HTTPTools = append(s.HTTPTools, example)
+	return nil
+}
+
 func (t networkTool) validate() error {
 	if strings.TrimSpace(t.Name) == "" || len(t.Name) > 120 || strings.TrimSpace(t.Description) == "" || len(t.Description) > 500 {
 		return errors.New("请填写工具名称和用途说明")
@@ -268,9 +287,6 @@ func (p *Platform) haEntities(ctx context.Context, s State) ([]haEntityState, er
 }
 func (a *api) networkToolRoutes(m *http.ServeMux) {
 	p := a.platform
-	m.HandleFunc("GET /api/network-tools/example", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, 200, map[string]string{"message": "喜悦 Voice 测试响应"})
-	})
 	m.HandleFunc("GET /api/network-tools", func(w http.ResponseWriter, r *http.Request) {
 		s := p.snapshot()
 		keyStatus := map[string]bool{}

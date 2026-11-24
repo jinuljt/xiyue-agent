@@ -64,7 +64,7 @@ func TestNetworkToolsAPIAndAutomation(t *testing.T) {
 		}
 		return w.Body.String()
 	}
-	if out := call("GET", "/example", "", 200); !strings.Contains(out, "喜悦 Voice 测试响应") {
+	if out := call("GET", "", "", 200); !strings.Contains(out, "net_example") {
 		t.Fatal(out)
 	}
 	call("PUT", "/home-assistant", fmt.Sprintf(`{"endpoint":%q,"api_key":%q}`, upstream.URL, token), 200)
@@ -100,6 +100,18 @@ func TestNetworkToolsAPIAndAutomation(t *testing.T) {
 	call("POST", "", strings.Replace(body, `"method":"GET"`, `"method":"POST","voice":true`, 1)+"}", 400)
 	if out := call("GET", "", "", 200); !strings.Contains(out, `"ha_key":true`) {
 		t.Fatal(out)
+	}
+	call("PUT", "/net_example", body+"}", 200)
+	if tool, _ := findNetworkTool(&p.state, "net_example"); tool.Name != "空气质量" {
+		t.Fatal("example did not use normal edit route")
+	}
+	call("DELETE", "/net_example", "", 200)
+	reopened, err := openPlatform(p.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := findNetworkTool(&reopened.state, "net_example"); ok {
+		t.Fatal("deleted example was restored after restart")
 	}
 }
 

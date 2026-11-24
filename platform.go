@@ -81,6 +81,7 @@ type State struct {
 	Search        searchSettings    `json:"search,omitempty"`
 	HomeAssistant string            `json:"home_assistant,omitempty"`
 	HTTPTools     []networkTool     `json:"http_tools,omitempty"`
+	HTTPExample   bool              `json:"http_example_installed,omitempty"`
 	Features      map[string]bool   `json:"features,omitempty"`
 	Rules         []automationRule  `json:"rules,omitempty"`
 	RoomListening bool              `json:"room_listening,omitempty"`
@@ -185,6 +186,9 @@ func openPlatform(path string) (*Platform, error) {
 		if p.activity.data.Imported && !p.activity.dirty {
 			p.state.Usage = nil
 		}
+		if !p.state.HTTPExample {
+			return p, p.change(installHTTPExample)
+		}
 		return p, nil
 	}
 	if !os.IsNotExist(err) {
@@ -198,7 +202,7 @@ func openPlatform(path string) (*Platform, error) {
 		}
 		p.state.Abilities[m.ID] = Ability{Manifest: m, Enabled: true, Config: map[string]string{}}
 	}
-	err = p.change(func(s *State) error { return nil })
+	err = p.change(installHTTPExample)
 	return p, err
 }
 
