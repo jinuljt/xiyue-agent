@@ -53,8 +53,9 @@ func (p *Platform) voiceReply(ctx context.Context, s State, message string, opti
 		*target = voicePlan{Action: "speak", Language: "zh", Speech: "请再说一遍。"}
 		return target.Speech, nil
 	}
-	const unavailable = "这次无法读取所需的实时信息。"
-	*options.voicePlan = voicePlan{Action: "speak", Language: "zh", Speech: unavailable}
+	language := s.Settings.replyLanguage()
+	unavailable := localizedVoiceText(language, "tool_unavailable")
+	*options.voicePlan = voicePlan{Action: "speak", Language: language, Speech: unavailable}
 	execute, ok := handlers[plan.Tool]
 	if !ok {
 		return unavailable, nil
@@ -64,7 +65,7 @@ func (p *Platform) voiceReply(ctx context.Context, s State, message string, opti
 		return unavailable, nil
 	}
 	if result == "[]" && execute.emptyResponse != "" {
-		target.Speech = execute.emptyResponse
+		target.Speech = localizedVoiceText(language, "search_empty")
 		return target.Speech, nil
 	}
 	data, _ := json.Marshal(result)

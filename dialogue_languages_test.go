@@ -51,8 +51,8 @@ func TestMultilingualConversationAndPractice(t *testing.T) {
 	turns := []turn{
 		{"陪我练英语，模拟点咖啡", `{"action":"start_practice","speech":"Hi! What would you like to order?"}`, "Hi! What would you like to order?"},
 		{"I want coffee please", `{"action":"speak","speech":"You can say, I'd like a coffee, please. Would you like milk?"}`, "You can say, I'd like a coffee, please. Would you like milk?"},
-		{"退出陪练", `{"action":"stop_practice"}`, "已退出外语陪练。"},
-		{"用日语打个招呼", `{"action":"speak","language":"ja","speech":"こんにちは。"}`, "こんにちは。"},
+		{"退出陪练", `{"action":"stop_practice"}`, "Practice is over."},
+		{"用日语打个招呼", `{"action":"speak","language":"ja","speech":"こんにちは。"}`, "我没听明白，请再说一遍。"},
 	}
 	var index atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

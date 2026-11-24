@@ -12,7 +12,7 @@ import (
 
 const speakerInstructions = `你是喜悦 Voice 音箱的语音助手。根据用户这一轮的完整意图，仅返回一个 JSON 对象，不要使用代码块：
 {"action":"speak","speech":"可以直接播报的文字"}
-默认用普通话，后续语言设置优先。用户明确要求其它语言回答时，在 speak 结果加 language 字段（如 en 或 ja），由音箱核对支持情况。
+按设置的对话语言生成播报，默认普通话。整个回合保持该语言。被要求更换对话语言时，用当前语言说明可在语音设置中切换。
 语音先说结论，日常默认一两句，目标约 8 秒。省略寒暄、复述、套话、Markdown 和括号旁白。用户明确要求详细说明时可分短句展开。保留重要数字、单位和条件。
 用户确实想结束当前对话时返回 {"action":"end"}。引用、询问退出方式、拒绝某个操作后继续提问，均继续正常对话。
 用户明确要求设置倒计时时返回 {"action":"countdown","seconds":秒数}。明确要求在一段时间后提醒时返回 {"action":"reminder","seconds":秒数,"content":"要提醒的事情"}。参数缺失时只用 speak 简短追问缺的参数。用户明确确认继续当前已暂停等待确认的步骤时返回 {"action":"next_step"}。
@@ -54,14 +54,20 @@ func parseVoicePlan(reply string) (voicePlan, error) {
 	}
 }
 
-func (p *Platform) applyVoicePlan(plan voicePlan, request string, now time.Time) (voiceTaskReply, error) {
+func (p *Platform) applyVoicePlan(plan voicePlan, request, language string, now time.Time) (voiceTaskReply, error) {
+	ask := func(text string) voiceTaskReply {
+		if language != "zh" {
+			text = localizedVoiceText(language, "verify_action")
+		}
+		return voiceTaskReply{text: text, handled: true}
+	}
 	if plan.Action != "speak" && hypotheticalTask.MatchString(request) {
-		return voiceTaskReply{text: "你想让我实际执行吗？", handled: true}, nil
+		return ask("你想让我实际执行吗？"), nil
 	}
 	switch plan.Action {
 	case "countdown", "reminder":
 		if plan.Seconds < 1 || plan.Seconds > 86400 {
-			return voiceTaskReply{text: "请说清楚时长，最多一天。", handled: true}, nil
+			return ask("请说清楚时长，最多一天。"), nil
 		}
 		content := strings.TrimSpace(plan.Content)
 		ability := "reminder"
@@ -69,10 +75,10 @@ func (p *Platform) applyVoicePlan(plan voicePlan, request string, now time.Time)
 			content, ability = "计时结束。", quickTimer.ID
 		}
 		if content == "" || len(content) > 2000 {
-			return voiceTaskReply{text: "要提醒什么事？", handled: true}, nil
+			return ask("要提醒什么事？"), nil
 		}
 		err := p.scheduleVoiceTask(ability, content, time.Duration(plan.Seconds)*time.Second, now)
-		return voiceTaskReply{text: "已设置。", handled: true, timer: plan.Action == "countdown"}, err
+		return voiceTaskReply{text: localizedVoiceText(language, "action_ok"), handled: true, timer: plan.Action == "countdown"}, err
 	case "next_step":
 		return p.voiceTask("继续下一步", now)
 	default:
@@ -87,7 +93,7 @@ func speechForSpeaker(text, request string) string {
 func speechForLanguage(text, request, language string) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return "我没听明白，请再说一遍。"
+		return localizedVoiceText(language, "repeat")
 	}
 	maxSentences, maxRunes := 2, 56
 	if language != "zh" {

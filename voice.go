@@ -51,6 +51,8 @@ type voiceResult struct {
 	taskID     string
 	CaptureMS  int64  `json:"capture_ms,omitempty"`
 	Revision   int    `json:"revision"`
+	Language   string `json:"language,omitempty"`
+	Voice      string `json:"voice,omitempty"`
 	Stage      string `json:"stage"`
 	ASRMS      int64  `json:"asr_ms"`
 	ModelMS    int64  `json:"model_ms"`
@@ -167,7 +169,7 @@ func (p *Platform) captureAndTranscribe(ctx context.Context, s State, capture vo
 	}
 	result.Stage = "asr"
 	start = time.Now()
-	text, err := transcribeSenseVoice(ctx, cfg, key, wav)
+	text, err := transcribeSenseVoice(ctx, cfg, key, wav, result.Language)
 	result.ASRMS = time.Since(start).Milliseconds()
 	if !test && ctx.Err() == nil {
 		p.activity.observeLocal("asr", cfg.Provider, s.Settings.Revision, err, time.Now().UTC())
@@ -175,7 +177,7 @@ func (p *Platform) captureAndTranscribe(ctx context.Context, s State, capture vo
 	return text, err
 }
 
-func transcribeSenseVoice(ctx context.Context, cfg ServiceConfig, key string, wav []byte) (string, error) {
+func transcribeSenseVoice(ctx context.Context, cfg ServiceConfig, key string, wav []byte, language string) (string, error) {
 	if cfg.Provider != "sensevoice" || cfg.Endpoint == "" {
 		return "", errors.New("请先配置 FunASR SenseVoice 服务地址")
 	}
@@ -190,6 +192,11 @@ func transcribeSenseVoice(ctx context.Context, cfg ServiceConfig, key string, wa
 	form := multipart.NewWriter(&body)
 	if err := form.WriteField("model", model); err != nil {
 		return "", err
+	}
+	if language != "" && language != "zh" {
+		if err := form.WriteField("language", language); err != nil {
+			return "", err
+		}
 	}
 	file, err := form.CreateFormFile("file", "utterance.wav")
 	if err != nil {
@@ -433,6 +440,13 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 	}()
 	s := p.snapshot()
 	result.Revision = s.Settings.Revision
+	result.Language = s.Settings.replyLanguage()
+	practice := ""
+	if dialogue != nil && s.Settings.PracticeEnabled && s.Settings.supportsPractice(dialogue.practice) {
+		practice = dialogue.practice
+		result.Language = practice
+	}
+	result.Voice = voiceDisplayName(s.Settings.TTS)
 	result.Stage = "configuration"
 	if err := v.yieldRoom(ctx); err != nil {
 		return result, err
@@ -447,7 +461,7 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 			stop()
 		}
 		if !asrReady(s.Settings.ASR) {
-			return "", errors.New("请先配置自建 SenseVoice 或豆包语音识别")
+			return "", errors.New("请先配置可用的语音识别服务")
 		}
 		result.Stage = "capture"
 		return p.captureAndTranscribe(ctx, s, capture, nil, &result, false)
@@ -485,23 +499,19 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 		return result, errors.New("请配置可用的语音合成服务")
 	}
 	result.Stage = "local_task"
-	practice := ""
-	if dialogue != nil && s.Settings.PracticeEnabled && s.Settings.supportsPractice(dialogue.practice) {
-		practice = dialogue.practice
-	}
 	var question *Event
 	if practice == "" {
 		question = activeQuestion(s, time.Now().UTC())
 	}
 	var taskReply voiceTaskReply
-	if practice == "" && question == nil {
+	if practice == "" && question == nil && result.Language == "zh" {
 		taskReply, err = p.voiceTask(command, time.Now().UTC())
 	}
 	if err != nil {
 		taskReply = voiceTaskReply{text: "这次没执行成功，请稍后再试。", handled: true}
 	}
 	reply := taskReply.text
-	language := "zh"
+	language := result.Language
 	nextPractice := practice
 	clearHistory := dialogue != nil && dialogue.practice != practice
 	if !taskReply.handled {
@@ -523,38 +533,44 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 				result.Stage = "conversation_ended"
 				return result, nil
 			}
-			plan = voicePlan{Action: "speak", Speech: "想结束时，直接说今天先这样就可以。", Language: "zh"}
+			plan = voicePlan{Action: "speak", Speech: localizedVoiceText(language, "repeat"), Language: language}
 		}
 		switch {
 		case plan.Action == "start_practice":
 			if dialogue == nil || !s.Settings.PracticeEnabled || !s.Settings.supportsPractice(s.Settings.practiceLanguage()) || strings.TrimSpace(plan.Speech) == "" {
-				reply = "请先在能力中心启用可用的外语陪练。"
+				reply = localizedVoiceText(language, "practice_unavailable")
 			} else {
 				language = s.Settings.practiceLanguage()
 				reply, nextPractice, clearHistory = plan.Speech, language, true
 			}
 		case plan.Action == "stop_practice" && practice != "":
-			reply, nextPractice, clearHistory = "已退出外语陪练。", "", true
+			reply, nextPractice, clearHistory = localizedVoiceText(language, "practice_end"), "", true
 		case practice != "":
 			language = practice
 			reply = plan.Speech
 			if strings.TrimSpace(reply) == "" || plan.Action != "speak" {
-				reply, language = "请再说一遍。", "zh"
+				reply = localizedVoiceText(language, "repeat")
 			}
 		case plan.Action == "speak":
-			var available bool
-			language, available = selectSpeechLanguage(s.Settings, plan)
+			var matches bool
+			language, matches = selectSpeechLanguage(s.Settings, plan)
 			reply = plan.Speech
-			if !available {
-				language, reply = "zh", "当前语音服务无法播报你选的语言。"
+			if !matches {
+				reply = localizedVoiceText(language, "repeat")
 			}
 		case plan.Action == "next_step" && question != nil:
 			taskReply, err = p.confirmQuestion(*question, time.Now().UTC())
 			reply = taskReply.text
+			if language != "zh" {
+				reply = localizedVoiceText(language, "verify_action")
+				if err == nil && taskReply.taskID != "" {
+					reply = localizedVoiceText(language, "action_ok")
+				}
+			}
 		case plan.Action != "":
-			taskReply, err = p.applyVoicePlan(plan, command, time.Now().UTC())
+			taskReply, err = p.applyVoicePlan(plan, command, language, time.Now().UTC())
 			if err != nil {
-				taskReply = voiceTaskReply{text: "这次没执行成功，请稍后再试。"}
+				taskReply = voiceTaskReply{text: localizedVoiceText(language, "verify_action")}
 			}
 			reply = taskReply.text
 		}
@@ -562,9 +578,11 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 	}
 	result.taskID = taskReply.taskID
 	result.Stage = "playback"
+	result.Language = language
 	response = reply
 	start := time.Now()
 	if taskReply.timer && v.playPCM != nil {
+		result.Voice = "提示音"
 		cueContext, stop := context.WithTimeout(ctx, time.Second)
 		err = v.playTone(cueContext, wakeTone)
 		stop()

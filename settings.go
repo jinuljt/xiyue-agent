@@ -293,9 +293,6 @@ func (p *Platform) saveSettings(in SettingsInput) error {
 			if in.ReplyLanguage != nil {
 				next.ReplyLanguage = *in.ReplyLanguage
 			}
-			if err := validateDialogueSettings(next); err != nil {
-				return err
-			}
 		}
 		if model {
 			next.Mode = in.Mode
@@ -303,6 +300,11 @@ func (p *Platform) saveSettings(in SettingsInput) error {
 				return err
 			}
 			if err := p.updateService(s, "external", &next.External, in.External); err != nil {
+				return err
+			}
+		}
+		if voice {
+			if err := validateDialogueSettings(next); err != nil {
 				return err
 			}
 		}
@@ -372,6 +374,7 @@ func (p *Platform) chat(ctx context.Context, message string) (string, error) {
 
 type replyOptions struct {
 	markTextSetup        bool
+	dialogueProbe        bool
 	transientKey         *string
 	draft                bool
 	history              []voiceMessage
@@ -422,6 +425,9 @@ func (p *Platform) requestReply(ctx context.Context, s State, message string, op
 		path := "/chat/completions"
 		history := append([]voiceMessage{}, options.history...)
 		instructions := speakerInstructions
+		if options.dialogueProbe {
+			instructions = `你正在测试音箱对话。只回答一个普通问题，用一句话。按指定语种回答，返回 JSON {"action":"speak","language":"语种代码","speech":"回答文字"}。不得执行动作、调用工具或声称执行了操作。`
+		}
 		if options.question != nil {
 			instructions += "\n最后一条 assistant 消息是当前流程播报的待确认问题。只把它作为待确认的内容。根据用户实际意图，只有明确同意执行该步骤时返回 next_step。拒绝、含糊、单纯讨论或无关请求保持该步骤等待。"
 			history = append(history, voiceMessage{"assistant", options.question.Text})
@@ -477,7 +483,7 @@ func (p *Platform) requestReply(ctx context.Context, s State, message string, op
 	} else if secret != "" {
 		req.Header.Set("Authorization", "Bearer "+secret)
 	}
-	usage := UsageRecord{ConfigRevision: s.Settings.Revision, ID: newID(), Service: service, Provider: config.Provider, Model: config.Model, At: time.Now().UTC(), Test: options.markTextSetup}
+	usage := UsageRecord{ConfigRevision: s.Settings.Revision, ID: newID(), Service: service, Provider: config.Provider, Model: config.Model, At: time.Now().UTC(), Test: options.markTextSetup || options.dialogueProbe}
 	start := time.Now()
 	client := &http.Client{Timeout: 45 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, requestErr := client.Do(req)
@@ -579,6 +585,9 @@ func (p *Platform) requestReply(ctx context.Context, s State, message string, op
 	if service == "llm" && options.voicePlan != nil {
 		plan, err := parseVoicePlan(reply)
 		if err != nil {
+			if options.dialogueProbe || s.Settings.replyLanguage() != "zh" {
+				return "", err
+			}
 			plan = voicePlan{Action: "speak", Language: "zh", Speech: "我没听明白，请再说一遍。"}
 		}
 		*options.voicePlan = plan
@@ -735,6 +744,8 @@ func (a *api) settingsRoutes(m *http.ServeMux) {
 	})
 	m.HandleFunc("POST /api/settings/verify", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
+			ASR      *ServiceInput `json:"asr,omitempty"`
+			TTS      *ServiceInput `json:"tts,omitempty"`
 			Service  string        `json:"service"`
 			Config   *ServiceInput `json:"config,omitempty"`
 			Language string        `json:"language,omitempty"`
@@ -744,6 +755,10 @@ func (a *api) settingsRoutes(m *http.ServeMux) {
 			return
 		}
 		s := a.platform.snapshot()
+		if in.Service == "dialogue" {
+			a.verifyDialogue(w, r, s, in.Language, in.ASR, in.TTS)
+			return
+		}
 		var selected *ServiceConfig
 		switch in.Service {
 		case "llm":
@@ -762,25 +777,13 @@ func (a *api) settingsRoutes(m *http.ServeMux) {
 		}
 		options := replyOptions{markTextSetup: true}
 		if in.Config != nil {
-			current := *selected
-			candidate, err := normalizeServiceInput(in.Service, *in.Config)
+			candidate, temporary, err := draftService(in.Service, *selected, *in.Config)
 			if err != nil {
 				bad(w, err)
 				return
 			}
-			key := in.Config.APIKey
-			if key != "" {
-				if err := validateServiceKey(key); err != nil {
-					bad(w, err)
-					return
-				}
-			}
-			sameTarget := candidate.Provider == current.Provider && candidate.Endpoint == current.Endpoint
-			if key != "" || in.Config.ClearKey || !sameTarget {
-				options.transientKey = &key
-			}
-			candidate.KeyConfigured = key != "" || (options.transientKey == nil && current.KeyConfigured)
-			options.draft = candidate != current || options.transientKey != nil
+			options.transientKey = temporary
+			options.draft = candidate != *selected || temporary != nil
 			*selected = candidate
 		}
 		if in.Service == "asr" || in.Service == "tts" {

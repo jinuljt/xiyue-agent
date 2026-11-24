@@ -80,3 +80,80 @@ func TestSpeechVerificationUsesDraftConfigurationAndSpeaker(t *testing.T) {
 		t.Fatal("speech verification saved settings or a recording")
 	}
 }
+
+func TestDialogueProbeKeepsTheTranscriptWhenPlaybackFails(t *testing.T) {
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/audio/transcriptions":
+			if r.FormValue("language") != "en" || r.Header.Get("Authorization") != "Bearer draft-asr" {
+				t.Error("probe did not use the draft recognition language and credential")
+			}
+			_, _ = io.WriteString(w, `{"text":"How are you?"}`)
+		case "/v1/chat/completions":
+			var input struct{ Messages []voiceMessage }
+			err := json.NewDecoder(r.Body).Decode(&input)
+			if err != nil || len(input.Messages) != 2 || !strings.Contains(input.Messages[0].Content, "测试语种为 en") || input.Messages[1].Content != "How are you?" {
+				t.Error("model lost the configured language or recognition result")
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{
+				"content": `{"action":"speak","language":"en","speech":"I'm doing well."}`,
+			}}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer model.Close()
+	p, err := openPlatform(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := p.snapshot().Settings
+	before.LLM = ServiceConfig{Provider: "custom", Endpoint: model.URL + "/v1", Model: "probe-fixture"}
+	if err := p.change(func(s *State) error { s.Settings = before; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	var attempts int
+	oldClient := deepseekTTSClient
+	defer func() { deepseekTTSClient = oldClient }()
+	deepseekTTSClient = &http.Client{Transport: networkRoundTrip(func(r *http.Request) (*http.Response, error) {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["text"] != "I'm doing well." ||
+			body["voice_id"] != "tide" || r.Header.Get("Authorization") != "Bearer draft-tts" {
+			t.Error("probe synthesized the wrong transcript, voice, or draft credential")
+		}
+		status := 200
+		if attempts == 1 {
+			status = 503
+		}
+		attempts++
+		return &http.Response{StatusCode: status, ContentLength: 4, Body: io.NopCloser(strings.NewReader("\x01\x02\x03\x04"))}, nil
+	})}
+	player := &voiceRuntime{playPCM: func(_ context.Context, pcm io.Reader) error {
+		_, err := io.Copy(io.Discard, pcm)
+		return err
+	}}
+	handler := (&api{platform: p, speechProbe: player, probeCapture: func(context.Context, func([]byte) error) ([]byte, error) {
+		return fixtureWAV(), nil
+	}}).routes()
+	payload, _ := json.Marshal(map[string]any{
+		"service": "dialogue", "language": "en",
+		"asr": ServiceInput{Provider: "sensevoice", Endpoint: model.URL + "/v1", APIKey: "draft-asr"},
+		"tts": ServiceInput{Provider: "deepseek", Model: "tide", APIKey: "draft-tts"},
+	})
+	for _, expected := range []string{"completed", "playback"} {
+		r := httptest.NewRequest("POST", "http://localhost/api/settings/verify", strings.NewReader(string(payload)))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("X-Xiyue-Request", "console")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		var result dialogueProbeResult
+		err := json.Unmarshal(w.Body.Bytes(), &result)
+		if w.Code != 200 || err != nil || result.Stage != expected || result.Transcript != "How are you?" ||
+			result.Reply != "I'm doing well." || result.Voice != "暗潮" || (result.Error != "") != (expected == "playback") {
+			t.Fatalf("probe did not preserve the trace: %d %s", w.Code, w.Body.String())
+		}
+	}
+	if p.snapshot().Settings != before || len(p.snapshot().Schedules) != 0 {
+		t.Fatal("preview changed saved settings or ran a task")
+	}
+}
