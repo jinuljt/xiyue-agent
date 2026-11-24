@@ -64,6 +64,9 @@ func TestNetworkToolsAPIAndAutomation(t *testing.T) {
 		}
 		return w.Body.String()
 	}
+	if out := call("GET", "/example", "", 200); !strings.Contains(out, "喜悦 Voice 测试响应") {
+		t.Fatal(out)
+	}
 	call("PUT", "/home-assistant", fmt.Sprintf(`{"endpoint":%q,"api_key":%q}`, upstream.URL, token), 200)
 	entities := call("GET", "/home-assistant/entities", "", 200)
 	if !strings.Contains(entities, "sensor.test") || strings.Contains(entities, "private") {

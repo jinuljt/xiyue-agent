@@ -263,6 +263,9 @@ func (p *Platform) haEntities(ctx context.Context, s State) ([]haEntity, error) 
 }
 func (a *api) networkToolRoutes(m *http.ServeMux) {
 	p := a.platform
+	m.HandleFunc("GET /api/network-tools/example", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, 200, map[string]string{"message": "喜悦 Voice 测试响应"})
+	})
 	m.HandleFunc("GET /api/network-tools", func(w http.ResponseWriter, r *http.Request) {
 		s := p.snapshot()
 		keyStatus := map[string]bool{}

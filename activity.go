@@ -507,7 +507,24 @@ func (a *api) activityRoutes(m *http.ServeMux) {
 	})
 	m.HandleFunc("GET /api/dialogues", func(w http.ResponseWriter, r *http.Request) {
 		_, offset := activityPage(r)
-		day := r.URL.Query().Get("date")
+		query := r.URL.Query()
+		from, to := query.Get("from"), query.Get("to")
+		if day := query.Get("date"); from == "" && to == "" && day != "" {
+			from, to = day, day
+		}
+		for _, day := range []string{from, to} {
+			if day == "" {
+				continue
+			}
+			if _, err := time.Parse(time.DateOnly, day); err != nil {
+				bad(w, errors.New("日期格式不正确"))
+				return
+			}
+		}
+		if from != "" && to != "" && from > to {
+			bad(w, errors.New("开始日期须早于或等于结束日期"))
+			return
+		}
 		loc, err := time.LoadLocation(a.platform.snapshot().Settings.Timezone)
 		if err != nil {
 			loc = time.UTC
@@ -523,7 +540,8 @@ func (a *api) activityRoutes(m *http.ServeMux) {
 		total := 0
 		for i := len(store.data.Dialogues) - 1; i >= 0; i-- {
 			row := store.data.Dialogues[i]
-			if day != "" && row.At.In(loc).Format(time.DateOnly) != day {
+			day := row.At.In(loc).Format(time.DateOnly)
+			if from != "" && day < from || to != "" && day > to {
 				continue
 			}
 			if total >= offset && len(rows) < usagePageSize {

@@ -77,6 +77,43 @@ func TestActivityRollupSurvivesDetailExpiryAndDialogueIsPrivate(t *testing.T) {
 	}
 }
 
+func TestDialogueDateRangeUsesDeviceCalendar(t *testing.T) {
+	p, err := openPlatform(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
+	p.state.Settings.Timezone = loc.String()
+	today := time.Now().In(loc)
+	midnight := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, loc)
+	dayBefore := midnight.AddDate(0, 0, -1)
+	p.activity.data.Dialogues = []dialogueRecord{
+		{ID: "older", At: dayBefore.Add(-time.Second).UTC()},
+		{ID: "start", At: dayBefore.UTC()},
+		{ID: "end", At: midnight.UTC()},
+	}
+	mux := (&api{platform: p}).routes()
+	call := func(query string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/dialogues?"+query, nil)
+		out := httptest.NewRecorder()
+		mux.ServeHTTP(out, req)
+		return out
+	}
+	from, to := dayBefore.Format(time.DateOnly), midnight.Format(time.DateOnly)
+	out := call("from=" + from + "&to=" + to)
+	var result struct {
+		Items []dialogueRecord
+		Count int
+	}
+	if err := json.Unmarshal(out.Body.Bytes(), &result); err != nil || out.Code != 200 || result.Count != 2 ||
+		len(result.Items) != 2 || result.Items[0].ID != "end" || result.Items[1].ID != "start" {
+		t.Fatalf("date range returned %d %s", out.Code, out.Body.String())
+	}
+	if out := call("from=" + to + "&to=" + from); out.Code != 400 {
+		t.Fatalf("reversed range returned %d", out.Code)
+	}
+}
+
 func TestUsageCostUsesCacheRateAndDoesNotGuessMissingUnits(t *testing.T) {
 	in, out, hit := int64(500), int64(100), int64(200)
 	inRate, outRate, hitRate := 2.0, 8.0, .04

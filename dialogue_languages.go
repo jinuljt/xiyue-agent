@@ -109,7 +109,11 @@ func (s SystemConfig) practiceChoices() []dialogueLanguage {
 
 func (s SystemConfig) practiceStatus() map[string]any {
 	return map[string]any{"revision": s.Revision, "enabled": s.PracticeEnabled, "language": s.practiceLanguage(), "available": s.practiceChoices(),
-		"asr_ready": asrReady(s.ASR), "tts_ready": s.TTS.Provider == "system" || s.TTS.KeyConfigured, "external_only": s.Mode == "external"}
+		"asr_ready": asrReady(s.ASR), "tts_ready": s.TTS.Provider == "system" || s.TTS.KeyConfigured, "external_only": s.Mode == "external",
+		"asr_languages": languageOptions.ASR[s.ASR.Provider], "tts_languages": supportedReplyLanguages(s.TTS),
+		"languages": slices.DeleteFunc(slices.Clone(dialogueLanguages), func(item dialogueLanguage) bool {
+			return !slices.Contains(languageOptions.Practice, item.ID)
+		})}
 }
 
 func (a *api) practiceRoutes(m *http.ServeMux) {
