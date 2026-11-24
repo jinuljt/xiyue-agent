@@ -37,6 +37,7 @@ type SystemConfig struct {
 	Mode                string        `json:"mode"`
 	ReplyLanguage       string        `json:"reply_language"`
 	PracticeEnabled     bool          `json:"practice_enabled"`
+	PracticeLanguage    string        `json:"practice_language,omitempty"`
 	ASR                 ServiceConfig `json:"asr"`
 	LLM                 ServiceConfig `json:"llm"`
 	TTS                 ServiceConfig `json:"tts"`
@@ -51,6 +52,7 @@ type ServiceInput struct {
 	ClearKey bool   `json:"clear_key"`
 }
 type SettingsInput struct {
+	Scope           string       `json:"scope,omitempty"`
 	Revision        int          `json:"revision"`
 	Name            string       `json:"name"`
 	WakeWord        string       `json:"wake_word"`
@@ -243,74 +245,93 @@ func (p *Platform) unseal(name, sealed string) (string, error) {
 	return string(plain), nil
 }
 func (p *Platform) saveSettings(in SettingsInput) error {
-	if strings.TrimSpace(in.Name) == "" || len(in.Name) > 120 || strings.TrimSpace(in.WakeWord) == "" || len(in.WakeWord) > 48 {
-		return errors.New("请填写有效的设备名称与唤醒词")
+	full := in.Scope == ""
+	device, voice, model := full || in.Scope == "device", full || in.Scope == "voice", full || in.Scope == "model"
+	if !device && !voice && !model {
+		return errors.New("未知的配置页面")
 	}
-	if p.wakeWords != nil && !p.wakeWords[strings.TrimSpace(in.WakeWord)] {
-		return errors.New("本机还没有这个唤醒词的识别配置，请保留当前唤醒词")
+	if device {
+		in.WakeWord = strings.TrimSpace(in.WakeWord)
+		if len(in.WakeWord) == 0 || len(in.WakeWord) > 48 || (full && (strings.TrimSpace(in.Name) == "" || len(in.Name) > 120)) {
+			return errors.New("请填写有效的设备名称与唤醒词")
+		}
+		if p.wakeWords != nil && !p.wakeWords[in.WakeWord] {
+			return errors.New("本机还没有这个唤醒词的识别配置，请保留当前唤醒词")
+		}
+		if _, err := time.LoadLocation(in.Timezone); err != nil {
+			return errors.New("时区无效")
+		}
 	}
-	if _, err := time.LoadLocation(in.Timezone); err != nil {
-		return errors.New("时区无效")
-	}
-	if in.Mode != "direct" && in.Mode != "external" && in.Mode != "hybrid" {
+	if model && in.Mode != "direct" && in.Mode != "external" && in.Mode != "hybrid" {
 		return errors.New("运行模式无效")
 	}
+
 	return p.change(func(s *State) error {
 		if in.Revision != s.Settings.Revision {
 			return errors.New("配置已被其他页面更新，请重新加载后保存")
 		}
-		if s.Sealed == nil {
-			s.Sealed = map[string]string{}
+		next := s.Settings
+		if device {
+			next.WakeWord, next.Timezone = in.WakeWord, in.Timezone
+			if full {
+				next.Name = strings.TrimSpace(in.Name)
+			}
 		}
-		next := SystemConfig{SetupComplete: s.Settings.SetupComplete, DeviceSetupComplete: s.Settings.DeviceSetupComplete, Revision: in.Revision + 1, Name: strings.TrimSpace(in.Name), WakeWord: strings.TrimSpace(in.WakeWord), Timezone: in.Timezone, Mode: in.Mode}
-		for name, input := range map[string]ServiceInput{"asr": in.ASR, "llm": in.LLM, "tts": in.TTS, "external": in.External} {
-			config, err := normalizeServiceInput(name, input)
-			if err != nil {
+		if voice {
+			if err := p.updateService(s, "asr", &next.ASR, in.ASR); err != nil {
 				return err
 			}
-			old := map[string]ServiceConfig{"asr": s.Settings.ASR, "llm": s.Settings.LLM, "tts": s.Settings.TTS, "external": s.Settings.External}[name]
-			secretName := "service:" + name
-			if input.ClearKey {
-				delete(s.Sealed, secretName)
+			if err := p.updateService(s, "tts", &next.TTS, in.TTS); err != nil {
+				return err
 			}
-			if (config.Endpoint != old.Endpoint || config.Provider != old.Provider) && s.Sealed[secretName] != "" && input.APIKey == "" {
-				return errors.New("更换服务商或地址时，请重新填写密钥，或勾选清除旧密钥")
+			if next.ReplyLanguage == "" {
+				next.ReplyLanguage = "zh"
 			}
-			if input.APIKey != "" {
-				sealed, err := p.seal(secretName, input.APIKey)
-				if err != nil {
-					return err
-				}
-				s.Sealed[secretName] = sealed
+			if in.ReplyLanguage != nil {
+				next.ReplyLanguage = *in.ReplyLanguage
 			}
-			config.KeyConfigured = s.Sealed[secretName] != ""
-			switch name {
-			case "asr":
-				next.ASR = config
-			case "llm":
-				next.LLM = config
-			case "tts":
-				next.TTS = config
-			case "external":
-				next.External = config
+			if err := validateDialogueSettings(next); err != nil {
+				return err
 			}
 		}
-		next.ReplyLanguage = s.Settings.replyLanguage()
-		next.PracticeEnabled = s.Settings.PracticeEnabled
-		if in.ReplyLanguage != nil {
-			next.ReplyLanguage = *in.ReplyLanguage
+		if model {
+			next.Mode = in.Mode
+			if err := p.updateService(s, "llm", &next.LLM, in.LLM); err != nil {
+				return err
+			}
+			if err := p.updateService(s, "external", &next.External, in.External); err != nil {
+				return err
+			}
 		}
-		if in.PracticeEnabled != nil {
+		if full && in.PracticeEnabled != nil {
 			next.PracticeEnabled = *in.PracticeEnabled
-		}
-		if err := validateDialogueSettings(next); err != nil {
-			return err
+			if next.PracticeEnabled && !next.supportsPractice(next.practiceLanguage()) {
+				return errors.New("请配置支持该语言的语音识别与合成")
+			}
 		}
 		now := time.Now().UTC()
+		next.Revision++
 		next.UpdatedAt = &now
 		s.Settings = next
 		return nil
 	})
+}
+
+func (p *Platform) updateService(s *State, name string, config *ServiceConfig, input ServiceInput) error {
+	candidate, err := normalizeServiceInput(name, input)
+	if err != nil {
+		return err
+	}
+	key := "service:" + name
+	if (candidate.Endpoint != config.Endpoint || candidate.Provider != config.Provider) && s.Sealed[key] != "" && !input.ClearKey && input.APIKey == "" {
+		return errors.New("更换服务商或地址时，请重新填写密钥，或勾选清除旧密钥")
+	}
+	if err := p.putNetworkKey(s, key, input.APIKey, input.ClearKey && input.APIKey == ""); err != nil {
+		return err
+	}
+	candidate.KeyConfigured = s.Sealed[key] != ""
+	*config = candidate
+	return nil
 }
 
 type UsageRecord struct {
@@ -648,6 +669,7 @@ func (a *api) serviceStatus(s State) map[string]serviceStatus {
 var bootTime = time.Now()
 
 func (a *api) settingsRoutes(m *http.ServeMux) {
+	a.practiceRoutes(m)
 	m.HandleFunc("GET /api/settings", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, a.platform.snapshot().Settings) })
 	m.HandleFunc("GET /api/dialogue/languages", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, languageOptions) })
 	m.HandleFunc("GET /api/providers", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, providers()) })

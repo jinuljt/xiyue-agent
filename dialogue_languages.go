@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
 	"slices"
 	"strings"
+	"time"
 )
 
 type dialogueLanguage struct {
@@ -46,7 +48,7 @@ var languageOptions = languageCatalog{
 		"doubao": {doubaoDefaultVoice: {"zh", "en", "ja", "id", "es-MX"}},
 	},
 	ASR:      map[string][]string{"doubao": {"zh", "en"}, "sensevoice": {"zh", "en", "ja", "ko", "yue"}},
-	Practice: []string{"en"},
+	Practice: []string{"en", "ja", "ko", "yue"},
 }
 
 func supportedReplyLanguages(config ServiceConfig) []string {
@@ -72,13 +74,10 @@ func (s SystemConfig) supportsPractice(language string) bool {
 }
 
 func validateDialogueSettings(s SystemConfig) error {
-	if (s.Mode == "external" && s.ReplyLanguage != "zh") ||
-		(s.ReplyLanguage != "zh" && !slices.Contains(supportedReplyLanguages(s.TTS), s.ReplyLanguage)) {
+	if s.ReplyLanguage != "zh" && !slices.Contains(supportedReplyLanguages(s.TTS), s.ReplyLanguage) {
 		return errors.New("请选择当前播报服务可用的回答语言")
 	}
-	if s.PracticeEnabled && !s.supportsPractice("en") {
-		return errors.New("英语陪练需要可用的英语语音识别、播报和音箱对话模式")
-	}
+
 	return nil
 }
 
@@ -91,9 +90,66 @@ func speechSample(language string) (string, error) {
 	return "", errors.New("请选择试听语言")
 }
 
-func dialoguePrompt(s SystemConfig, practice bool) string {
-	if practice {
-		return "\n当前为英语口语陪练。用自然、简短的英语扮演用户选择的情景。每轮最多给一个友善的表达改进，再继续角色对话并提一个问题。关注措辞和语法，无法从转写判断发音。只用 speak；用户明确要求退出陪练时返回 {\"action\":\"stop_practice\"}，想结束整场对话时返回 {\"action\":\"end\"}。"
+func (s SystemConfig) practiceLanguage() string {
+	if s.PracticeLanguage == "" {
+		return "en"
+	}
+	return s.PracticeLanguage
+}
+
+func (s SystemConfig) practiceChoices() []dialogueLanguage {
+	choices := []dialogueLanguage{}
+	for _, item := range dialogueLanguages {
+		if s.supportsPractice(item.ID) {
+			choices = append(choices, item)
+		}
+	}
+	return choices
+}
+
+func (s SystemConfig) practiceStatus() map[string]any {
+	return map[string]any{"revision": s.Revision, "enabled": s.PracticeEnabled, "language": s.practiceLanguage(), "available": s.practiceChoices(),
+		"asr_ready": asrReady(s.ASR), "tts_ready": s.TTS.Provider == "system" || s.TTS.KeyConfigured, "external_only": s.Mode == "external"}
+}
+
+func (a *api) practiceRoutes(m *http.ServeMux) {
+	p := a.platform
+	m.HandleFunc("GET /api/abilities/language-practice", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, p.snapshot().Settings.practiceStatus())
+	})
+	m.HandleFunc("PUT /api/abilities/language-practice", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Enabled  bool   `json:"enabled"`
+			Language string `json:"language"`
+		}
+		if err := decode(w, r, &in); err != nil {
+			bad(w, err)
+			return
+		}
+		err := p.change(func(s *State) error {
+			if in.Enabled && !s.Settings.supportsPractice(in.Language) {
+				return errors.New("请选择当前识别和播报都支持的陪练语言")
+			}
+			if in.Enabled {
+				s.Settings.PracticeLanguage = in.Language
+			}
+			s.Settings.PracticeEnabled = in.Enabled
+			s.Settings.Revision++
+			now := time.Now().UTC()
+			s.Settings.UpdatedAt = &now
+			return nil
+		})
+		if err != nil {
+			bad(w, err)
+			return
+		}
+		writeJSON(w, 200, p.snapshot().Settings.practiceStatus())
+	})
+}
+
+func dialoguePrompt(s SystemConfig, practice string) string {
+	if practice != "" {
+		return "\n当前为口语陪练，语种代码为 " + practice + "。用该语言自然、简短地扮演用户选择的情景。每轮最多给一个友善的表达改进，再继续角色对话并提一个问题。关注措辞和语法，无法从转写判断发音。只用 speak；用户明确要求退出陪练时返回 {\"action\":\"stop_practice\"}，想结束整场对话时返回 {\"action\":\"end\"}。"
 	}
 	languages := supportedReplyLanguages(s.TTS)
 	if len(languages) <= 1 {
@@ -101,15 +157,15 @@ func dialoguePrompt(s SystemConfig, practice bool) string {
 	}
 	codes, _ := json.Marshal(languages)
 	prompt := "\n默认回答语言为 " + s.replyLanguage() + "。用户明确要求本轮用某种语言时，用该语言生成 speech，并加上 language 字段，使用这一列表里的语种代码：" + string(codes) + "。默认语言也应输出对应的 language。明确要求的语种不在列表时仍填写其语种代码，由音箱处理。"
-	if s.PracticeEnabled && s.supportsPractice("en") {
-		prompt += "\n仅当用户明确要求开始英语口语陪练时，返回 {\"action\":\"start_practice\",\"speech\":\"一句英文开场，并提出第一个问题\"}。明确指定其他陪练语言时用当前默认语言说明目前可以练英语。"
+	if s.PracticeEnabled && s.supportsPractice(s.practiceLanguage()) {
+		prompt += "\n仅当用户明确要求开始口语陪练时，使用已配置的陪练语种 " + s.practiceLanguage() + "，返回 {\"action\":\"start_practice\",\"speech\":\"用已配置语种开场，并提出第一个问题\"}。如果用户明确指定另一种陪练语言，说明目前配置的陪练语言。"
 	}
 	return prompt
 }
 
 type dialogueSession struct {
 	history  []voiceMessage
-	practice bool
+	practice string
 }
 
 func selectSpeechLanguage(settings SystemConfig, plan voicePlan) (string, bool) {

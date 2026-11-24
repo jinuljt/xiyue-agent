@@ -39,7 +39,7 @@ func (p *Platform) voiceReply(ctx context.Context, s State, message string, opti
 	target := options.voicePlan
 	plan := *target
 	if options.practice {
-		*target = voicePlan{Action: "speak", Language: "en", Speech: "Let’s stay with the exercise. What would you say next?"}
+		*target = voicePlan{Action: "speak", Language: "zh", Speech: "请再说一遍。"}
 		return target.Speech, nil
 	}
 	const unavailable = "这次无法读取所需的实时信息。"

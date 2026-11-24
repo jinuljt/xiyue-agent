@@ -51,7 +51,7 @@ func TestMultilingualConversationAndPractice(t *testing.T) {
 	turns := []turn{
 		{"陪我练英语，模拟点咖啡", `{"action":"start_practice","speech":"Hi! What would you like to order?"}`, "Hi! What would you like to order?"},
 		{"I want coffee please", `{"action":"speak","speech":"You can say, I'd like a coffee, please. Would you like milk?"}`, "You can say, I'd like a coffee, please. Would you like milk?"},
-		{"退出陪练", `{"action":"stop_practice"}`, "已退出英语陪练。"},
+		{"退出陪练", `{"action":"stop_practice"}`, "已退出外语陪练。"},
 		{"用日语打个招呼", `{"action":"speak","language":"ja","speech":"こんにちは。"}`, "こんにちは。"},
 	}
 	var index atomic.Int32
@@ -68,10 +68,10 @@ func TestMultilingualConversationAndPractice(t *testing.T) {
 			return
 		}
 		prompt := request.Messages[0].Content
-		if i == 1 && (!strings.Contains(prompt, "当前为英语口语陪练") || len(request.Messages) != 4) {
+		if i == 1 && (!strings.Contains(prompt, "当前为口语陪练") || len(request.Messages) != 4) {
 			t.Error("practice settings or history missing")
 		}
-		if i == 3 && (strings.Contains(prompt, "当前为英语口语陪练") || len(request.Messages) != 2) {
+		if i == 3 && (strings.Contains(prompt, "当前为口语陪练") || len(request.Messages) != 2) {
 			t.Error("practice settings persisted after exit")
 		}
 		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": turns[i].plan}}}})
@@ -112,7 +112,7 @@ func TestMultilingualConversationAndPractice(t *testing.T) {
 	for i := range turns {
 		index.Store(int32(i))
 		got, err := p.runSpeechTurn(context.Background(), v, capture, nil, &dialogue, false)
-		if err != nil || got.Stage != "completed" || dialogue.practice != (i < 2) {
+		if err != nil || got.Stage != "completed" || (dialogue.practice != "") != (i < 2) {
 			t.Fatalf("turn %d: %+v %+v %v", i, got, dialogue, err)
 		}
 	}

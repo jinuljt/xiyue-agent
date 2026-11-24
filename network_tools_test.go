@@ -161,3 +161,25 @@ func TestVoiceSearchDispatchAndCost(t *testing.T) {
 type networkRoundTrip func(*http.Request) (*http.Response, error)
 
 func (fn networkRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return fn(r) }
+
+func TestWeatherTemplateFixedQueryAndUnits(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("latitude") != "31.23" || r.URL.Query().Get("current") != "temperature_2m" {
+			t.Errorf("unexpected query %v", r.URL.Query())
+		}
+		io.WriteString(w, `{"current":{"temperature_2m":19}}`)
+	}))
+	defer upstream.Close()
+	tool := networkTool{Kind: "http", Name: "上海当前气温", Description: "查询气温", Method: "GET",
+		Endpoint: upstream.URL + "?latitude=31.23&current=temperature_2m", Extract: "current.temperature_2m", Unit: "°C"}
+	if err := tool.validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := (&Platform{}).executeNetworkTool(context.Background(), State{}, tool, nil, ""); err != nil || got != "19 °C" {
+		t.Fatalf("%q %v", got, err)
+	}
+	tool.Endpoint += "&api_key=fixture"
+	if tool.validate() == nil {
+		t.Fatal("secret in URL accepted")
+	}
+}

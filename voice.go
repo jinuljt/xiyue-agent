@@ -485,13 +485,16 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 		return result, errors.New("请配置可用的语音合成服务")
 	}
 	result.Stage = "local_task"
-	practice := dialogue != nil && dialogue.practice && s.Settings.PracticeEnabled && s.Settings.supportsPractice("en")
+	practice := ""
+	if dialogue != nil && s.Settings.PracticeEnabled && s.Settings.supportsPractice(dialogue.practice) {
+		practice = dialogue.practice
+	}
 	var question *Event
-	if !practice {
+	if practice == "" {
 		question = activeQuestion(s, time.Now().UTC())
 	}
 	var taskReply voiceTaskReply
-	if !practice && question == nil {
+	if practice == "" && question == nil {
 		taskReply, err = p.voiceTask(command, time.Now().UTC())
 	}
 	if err != nil {
@@ -510,7 +513,7 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 			previous = dialogue.history
 		}
 		var plan voicePlan
-		reply, err = p.voiceReply(ctx, s, text, replyOptions{history: previous, voicePlan: &plan, question: question, practice: practice, dialogueInstructions: dialoguePrompt(s.Settings, practice)})
+		reply, err = p.voiceReply(ctx, s, text, replyOptions{history: previous, voicePlan: &plan, question: question, practice: practice != "", dialogueInstructions: dialoguePrompt(s.Settings, practice)})
 		result.ModelMS = time.Since(start).Milliseconds()
 		if err != nil {
 			return result, err
@@ -524,18 +527,19 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 		}
 		switch {
 		case plan.Action == "start_practice":
-			if dialogue == nil || !s.Settings.PracticeEnabled || !s.Settings.supportsPractice("en") || strings.TrimSpace(plan.Speech) == "" {
-				reply = "请先在控制台启用可用的英语陪练。"
+			if dialogue == nil || !s.Settings.PracticeEnabled || !s.Settings.supportsPractice(s.Settings.practiceLanguage()) || strings.TrimSpace(plan.Speech) == "" {
+				reply = "请先在能力中心启用可用的外语陪练。"
 			} else {
-				reply, language, nextPractice, clearHistory = plan.Speech, "en", true, true
+				language = s.Settings.practiceLanguage()
+				reply, nextPractice, clearHistory = plan.Speech, language, true
 			}
-		case plan.Action == "stop_practice" && practice:
-			reply, nextPractice, clearHistory = "已退出英语陪练。", false, true
-		case practice:
-			language = "en"
+		case plan.Action == "stop_practice" && practice != "":
+			reply, nextPractice, clearHistory = "已退出外语陪练。", "", true
+		case practice != "":
+			language = practice
 			reply = plan.Speech
 			if strings.TrimSpace(reply) == "" || plan.Action != "speak" {
-				reply = "Let's try that again. What would you like to say?"
+				reply, language = "请再说一遍。", "zh"
 			}
 		case plan.Action == "speak":
 			var available bool
@@ -577,7 +581,7 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 		if clearHistory {
 			dialogue.history = nil
 		}
-		if !clearHistory || nextPractice {
+		if !clearHistory || nextPractice != "" {
 			dialogue.history = append(dialogue.history, voiceMessage{"user", clipDialogue(text)}, voiceMessage{"assistant", clipDialogue(reply)})
 			if len(dialogue.history) > 8 {
 				dialogue.history = dialogue.history[len(dialogue.history)-8:]

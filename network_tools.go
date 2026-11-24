@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
@@ -25,6 +26,7 @@ type networkTool struct {
 	Entity      string             `json:"entity,omitempty"`
 	Operation   string             `json:"operation,omitempty"`
 	Extract     string             `json:"extract,omitempty"`
+	Unit        string             `json:"unit,omitempty"`
 	Parameters  []networkParameter `json:"parameters,omitempty"`
 	Voice       bool               `json:"voice"`
 	Automation  bool               `json:"automation"`
@@ -71,7 +73,22 @@ func (t networkTool) validate() error {
 		return err
 	}
 	if u.RawQuery != "" {
-		return errors.New("请通过参数配置查询字符串")
+		if t.Method != "GET" {
+			return errors.New("固定查询参数只适用于 GET 工具")
+		}
+		query, err := url.ParseQuery(u.RawQuery)
+		if err != nil || len(query) > 16 {
+			return errors.New("固定查询参数无效")
+		}
+		for name := range query {
+			switch strings.ToLower(name) {
+			case "key", "api_key", "apikey", "api-key", "auth", "authorization", "token", "access_token", "password", "secret", "signature":
+				return errors.New("请使用凭证字段保存密钥")
+			}
+		}
+	}
+	if len(t.Unit) > 24 || strings.ContainsAny(t.Unit, "\r\n") {
+		return errors.New("返回值单位过长或包含换行")
 	}
 	if len(t.Extract) > 100 || (t.Extract != "" && !resultPath.MatchString(t.Extract)) {
 		return errors.New("返回字段请填写 JSON 路径，例如 data.value")
@@ -190,6 +207,9 @@ func (p *Platform) executeNetworkTool(ctx context.Context, s State, t networkToo
 		if unit, e := selectNetworkResult(data, "attributes.unit_of_measurement"); e == nil && unit != "null" {
 			result += " " + boundedText(unit, 40)
 		}
+	}
+	if err == nil && t.Kind == "http" && result != "" && t.Unit != "" {
+		result += " " + t.Unit
 	}
 	return result, err
 }
@@ -341,7 +361,7 @@ func (a *api) networkToolRoutes(m *http.ServeMux) {
 		t.ID = id
 		t.Name, t.Description, t.Endpoint, t.Extract = strings.TrimSpace(t.Name), strings.TrimSpace(t.Description), strings.TrimSpace(t.Endpoint), strings.TrimSpace(t.Extract)
 		if t.Kind == "ha" {
-			t.Endpoint, t.Extract, t.Parameters = "", "", nil
+			t.Endpoint, t.Extract, t.Unit, t.Parameters = "", "", "", nil
 			t.Method = http.MethodGet
 			if t.Operation != "state" {
 				t.Method = http.MethodPost
