@@ -10,9 +10,10 @@ import (
 )
 
 type automationStep struct {
-	Action  string `json:"action"`
-	Value   string `json:"value,omitempty"`
-	Seconds int    `json:"seconds,omitempty"`
+	Action     string            `json:"action"`
+	Value      string            `json:"value,omitempty"`
+	Seconds    int               `json:"seconds,omitempty"`
+	Parameters map[string]string `json:"parameters,omitempty"`
 }
 
 type automationRun struct {
@@ -62,6 +63,14 @@ func validateAutomation(s *State, rule automationRule) error {
 	for _, step := range rule.Actions {
 		switch step.Action {
 		case "room_start", "room_stop":
+		case "http_tool":
+			tool, ok := findNetworkTool(s, step.Value)
+			if !ok || !tool.Automation {
+				return errors.New("请选择已授权给自动化的工具")
+			}
+			if _, err := tool.values(step.Parameters); err != nil {
+				return err
+			}
 		case "timer":
 			if step.Seconds < 1 || step.Seconds > 86400 || len(step.Value) > 120 {
 				return errors.New("请检查倒计时秒数和名称")
@@ -289,6 +298,14 @@ func (p *Platform) executeAutomation(now time.Time, room *roomAudio, id, source 
 
 func (p *Platform) runAutomationStep(room *roomAudio, action automationStep, now time.Time) error {
 	switch action.Action {
+	case "http_tool":
+		s := p.snapshot()
+		tool, ok := findNetworkTool(&s, action.Value)
+		if !ok || !tool.Automation {
+			return errors.New("该工具已停用或撤销自动化授权")
+		}
+		_, err := p.runNetworkTool(context.Background(), s, tool, action.Parameters)
+		return err
 	case "room_start":
 		_, err := room.start(p)
 		return err

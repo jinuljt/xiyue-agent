@@ -78,6 +78,9 @@ type Schedule struct {
 	Failure   string            `json:"failure,omitempty"`
 }
 type State struct {
+	Search        searchSettings    `json:"search,omitempty"`
+	HomeAssistant string            `json:"home_assistant,omitempty"`
+	HTTPTools     []networkTool     `json:"http_tools,omitempty"`
 	Features      map[string]bool   `json:"features,omitempty"`
 	Rules         []automationRule  `json:"rules,omitempty"`
 	RoomAudio     *roomAudioConfig  `json:"room_audio,omitempty"`

@@ -503,7 +503,7 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 			previous = *history
 		}
 		var plan voicePlan
-		reply, err = p.requestReply(ctx, s, text, replyOptions{history: previous, voicePlan: &plan, question: question})
+		reply, err = p.voiceReply(ctx, s, text, replyOptions{history: previous, voicePlan: &plan, question: question})
 		result.ModelMS = time.Since(start).Milliseconds()
 		if err != nil {
 			return result, err

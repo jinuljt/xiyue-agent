@@ -46,6 +46,7 @@ type usageRate struct {
 	PerMillionOut *float64  `json:"per_million_out"`
 	PerMillionHit *float64  `json:"per_million_hit"`
 	PerAudioHour  *float64  `json:"per_audio_hour"`
+	PerRequest    *float64  `json:"per_request,omitempty"`
 	Per10kChars   *float64  `json:"per_10k_chars"`
 	UpdatedAt     time.Time `json:"updated_at"`
 	Source        string    `json:"source"`
@@ -134,6 +135,14 @@ func (r usageRate) estimate(u UsageRecord) (float64, bool) {
 		return float64(*amount) * *price / divisor, true
 	}
 	switch u.Service {
+	case "search":
+		if u.BillableRequest == nil || r.PerRequest == nil {
+			return 0, false
+		}
+		if !*u.BillableRequest {
+			return 0, true
+		}
+		return *r.PerRequest, true
 	case "asr":
 		return cost(u.AudioMS, r.PerAudioHour, 3_600_000)
 	case "tts":
@@ -197,7 +206,7 @@ func (a *activityStore) addLocked(u UsageRecord, timezone string) {
 	b := a.data.Daily[key]
 	b.Day, b.Service, b.Provider, b.Model, b.Currency = u.Day, u.Service, u.Provider, u.Model, u.Currency
 	b.Calls++
-	if u.AudioMS != nil || u.Characters != nil || u.InputTokens != nil || u.OutputTokens != nil {
+	if u.AudioMS != nil || u.Characters != nil || u.InputTokens != nil || u.OutputTokens != nil || u.BillableRequest != nil {
 		b.Metered++
 	}
 	if u.AudioMS != nil {
@@ -228,6 +237,11 @@ func builtinUsageRate(u UsageRecord) (usageRate, bool) {
 	rate := usageRate{Service: u.Service, Provider: u.Provider, Model: u.Model, Currency: "CNY",
 		Source: "火山引擎公开后付费单价", UpdatedAt: time.Date(2026, time.November, 21, 0, 0, 0, 0, time.UTC)}
 	switch {
+	case u.Service == "search" && u.Provider == "deepseek":
+		price := 0.005
+		rate.PerRequest = &price
+		rate.Source = "DeepSeek Search / Fetch 官方公开单价"
+		rate.UpdatedAt = time.Date(2026, time.November, 24, 0, 0, 0, 0, time.UTC)
 	case u.Service == "asr" && u.Provider == "doubao" && u.Model == doubaoASRResource:
 		price := 1.0
 		rate.PerAudioHour = &price
@@ -365,6 +379,35 @@ var sensitiveDialogue = regexp.MustCompile(`(?i)确认登录|登录口令|验证
 
 func (a *api) activityRoutes(m *http.ServeMux) {
 	store := a.platform.activity
+	m.HandleFunc("GET /api/usage/summary", func(w http.ResponseWriter, r *http.Request) {
+		loc, err := time.LoadLocation(a.platform.snapshot().Settings.Timezone)
+		if err != nil {
+			loc = time.UTC
+		}
+		today := time.Now().In(loc).Format(time.DateOnly)
+		month := today[:7]
+		var calls, missing int64
+		totals := map[string]float64{}
+		store.mu.Lock()
+		if store.loadErr != nil {
+			store.mu.Unlock()
+			writeJSON(w, 503, map[string]string{"error": "用量记录暂不可读"})
+			return
+		}
+		for _, row := range store.data.Daily {
+			if row.Day == today {
+				calls += row.Calls
+			}
+			if row.Day <= today && strings.HasPrefix(row.Day, month) {
+				missing += row.Calls - row.KnownCost
+				if row.KnownCost > 0 {
+					totals[row.Currency] += row.Estimated
+				}
+			}
+		}
+		store.mu.Unlock()
+		writeJSON(w, 200, map[string]any{"today_calls": calls, "month_unpriced": missing, "month_costs": totals})
+	})
 	m.HandleFunc("GET /api/usage", func(w http.ResponseWriter, r *http.Request) {
 		days, offset := activityPage(r)
 		q := r.URL.Query()

@@ -60,6 +60,7 @@ func (a *api) routes() http.Handler {
 	a.voiceRoutes(m)
 	a.deviceAudioRoutes(m)
 	a.roomAudioRoutes(m)
+	a.networkToolRoutes(m)
 	a.clockRoutes(m)
 	a.automationRoutes(m)
 	a.adminRoutes(m)

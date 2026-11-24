@@ -22,10 +22,12 @@ var detailedSpeech = regexp.MustCompile(`详细|展开|细说|一步步|多说�
 var hypotheticalTask = regexp.MustCompile(`^(?:请|你能)?(?:说说|解释|举例|如何|怎么|怎样|如果|假如|不要|不用)`)
 
 type voicePlan struct {
-	Action  string `json:"action"`
-	Speech  string `json:"speech,omitempty"`
-	Seconds int    `json:"seconds,omitempty"`
-	Content string `json:"content,omitempty"`
+	Action    string            `json:"action"`
+	Speech    string            `json:"speech,omitempty"`
+	Seconds   int               `json:"seconds,omitempty"`
+	Content   string            `json:"content,omitempty"`
+	Tool      string            `json:"tool,omitempty"`
+	Arguments map[string]string `json:"arguments,omitempty"`
 }
 
 func parseVoicePlan(reply string) (voicePlan, error) {
@@ -43,7 +45,7 @@ func parseVoicePlan(reply string) (voicePlan, error) {
 		return voicePlan{}, errors.New("语音回复格式无效")
 	}
 	switch plan.Action {
-	case "speak", "end", "countdown", "reminder", "next_step":
+	case "speak", "end", "countdown", "reminder", "next_step", "tool":
 		return plan, nil
 	default:
 		return voicePlan{}, errors.New("语音回复动作无效")
