@@ -83,6 +83,8 @@ type State struct {
 	HTTPTools     []networkTool     `json:"http_tools,omitempty"`
 	HTTPExample   bool              `json:"http_example_installed,omitempty"`
 	Features      map[string]bool   `json:"features,omitempty"`
+	FlowMigration bool              `json:"flow_migration,omitempty"`
+	LegacyFlows   []string          `json:"legacy_flows,omitempty"`
 	Rules         []automationRule  `json:"rules,omitempty"`
 	RoomListening bool              `json:"room_listening,omitempty"`
 	RoomAudio     *roomAudioConfig  `json:"room_audio,omitempty"`
@@ -105,6 +107,8 @@ type Platform struct {
 	queueSpeech bool
 	wakeWords   map[string]bool
 	activity    *activityStore
+	// Owned by the automation worker. Running workflows are interrupted on restart.
+	automationValues map[string]map[string]json.RawMessage
 }
 
 var identifier = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,47}$`)

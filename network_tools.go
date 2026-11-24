@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -109,7 +110,7 @@ func (t networkTool) validate() error {
 	if len(t.Unit) > 24 || strings.ContainsAny(t.Unit, "\r\n") {
 		return errors.New("返回值单位过长或包含换行")
 	}
-	if len(t.Extract) > 100 || (t.Extract != "" && !resultPath.MatchString(t.Extract)) {
+	if len(t.Extract) > 100 || (t.Extract != "" && !resultPath.MatchString(t.Extract) && !strings.HasPrefix(t.Extract, "/")) {
 		return errors.New("返回字段请填写 JSON 路径，例如 data.value")
 	}
 	if len(t.Parameters) > 8 {
@@ -183,16 +184,22 @@ func (p *Platform) putNetworkKey(s *State, name, key string, clear bool) error {
 	s.Sealed[name] = sealed
 	return nil
 }
-func (p *Platform) executeNetworkTool(ctx context.Context, s State, t networkTool, args map[string]string, key string) (string, error) {
+
+type networkToolResult struct {
+	Value json.RawMessage
+	text  string
+}
+
+func (p *Platform) executeNetworkTool(ctx context.Context, s State, t networkTool, args map[string]string, key string) (networkToolResult, error) {
 	values, err := t.values(args)
 	if err != nil {
-		return "", err
+		return networkToolResult{}, err
 	}
 	endpoint, method, extract := t.Endpoint, t.Method, t.Extract
 	var payload any
 	if t.Kind == "ha" {
 		if s.HomeAssistant == "" || key == "" {
-			return "", errors.New("请先连接 Home Assistant")
+			return networkToolResult{}, errors.New("请先连接 Home Assistant")
 		}
 		endpoint, method, extract = s.HomeAssistant+"/api/states/"+t.Entity, http.MethodGet, "state"
 		if t.Operation != "state" {
@@ -203,7 +210,7 @@ func (p *Platform) executeNetworkTool(ctx context.Context, s State, t networkToo
 	} else if method == http.MethodGet {
 		u, err := configuredURL(endpoint)
 		if err != nil {
-			return "", err
+			return networkToolResult{}, err
 		}
 		query := u.Query()
 		for key, val := range values {
@@ -216,21 +223,29 @@ func (p *Platform) executeNetworkTool(ctx context.Context, s State, t networkToo
 	}
 	data, err := callNetwork(ctx, endpoint, method, key, payload, 128<<10)
 	if err != nil {
-		return "", err
+		return networkToolResult{}, err
 	}
 	if t.Kind == "ha" && t.Operation != "state" {
-		return "Home Assistant 已接受操作。", nil
+		return networkToolResult{Value: json.RawMessage("null"), text: "Home Assistant 已接受操作。"}, nil
 	}
-	result, err := selectNetworkResult(data, extract)
-	if err == nil && t.Kind == "ha" {
-		if unit, e := selectNetworkResult(data, "attributes.unit_of_measurement"); e == nil && unit != "null" {
-			result += " " + boundedText(unit, 40)
+	if len(bytes.TrimSpace(data)) == 0 && extract == "" {
+		return networkToolResult{Value: json.RawMessage("null")}, nil
+	}
+	value, err := selectNetworkValue(data, extract)
+	if err != nil {
+		return networkToolResult{}, err
+	}
+	result := networkToolResult{Value: value, text: networkValueText(value)}
+	if t.Kind == "ha" {
+		if unit, e := selectNetworkValue(data, "attributes.unit_of_measurement"); e == nil && string(unit) != "null" {
+			result.text += " " + boundedText(networkValueText(unit), 40)
 		}
 	}
-	if err == nil && t.Kind == "http" && result != "" && t.Unit != "" {
-		result += " " + t.Unit
+	// Existing display and voice consumers keep their saved suffix.
+	if t.Kind == "http" && result.text != "" && t.Unit != "" {
+		result.text += " " + t.Unit
 	}
-	return result, err
+	return result, nil
 }
 func formatNetworkValue(v any) string {
 	if s, ok := v.(string); ok {
@@ -240,13 +255,18 @@ func formatNetworkValue(v any) string {
 	return string(b)
 }
 func (p *Platform) runNetworkTool(ctx context.Context, s State, t networkTool, args map[string]string) (string, error) {
+	result, err := p.networkToolValue(ctx, s, t, args)
+	return result.text, err
+}
+
+func (p *Platform) networkToolValue(ctx context.Context, s State, t networkTool, args map[string]string) (networkToolResult, error) {
 	name := "network:" + t.ID
 	if t.Kind == "ha" {
 		name = haSecret
 	}
 	key, err := p.networkKey(s, name)
 	if err != nil {
-		return "", err
+		return networkToolResult{}, err
 	}
 	return p.executeNetworkTool(ctx, s, t, args, key)
 }
@@ -439,6 +459,9 @@ func (a *api) networkToolRoutes(m *http.ServeMux) {
 			}
 			if index >= 0 {
 				old := s.HTTPTools[index]
+				if t.Unit == "" && old.Kind == "http" {
+					t.Unit = old.Unit
+				}
 				if old.Kind != t.Kind {
 					return errors.New("无法更改工具类型")
 				}
@@ -513,6 +536,9 @@ func (a *api) networkToolRoutes(m *http.ServeMux) {
 			return
 		}
 		s := p.snapshot()
+		if old, ok := findNetworkTool(&s, t.ID); ok && t.Unit == "" && old.Kind == "http" {
+			t.Unit = old.Unit
+		}
 		key := in.APIKey
 		if key != "" {
 			err = validateServiceKey(key)
@@ -534,6 +560,6 @@ func (a *api) networkToolRoutes(m *http.ServeMux) {
 			bad(w, err)
 			return
 		}
-		writeJSON(w, 200, map[string]string{"result": out})
+		writeJSON(w, 200, map[string]any{"result": out.text, "value": out.Value})
 	})
 }

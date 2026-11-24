@@ -403,7 +403,7 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:8765", "本地开发监听地址")
 	statePath := flag.String("state", "data/state.json", "持久化状态文件")
 	consoleDir := flag.String("console", "../xiyue-console", "控制台静态文件目录")
-	abilityDir := flag.String("abilities", "../xiyue-abilities/capabilities", "可选的声明式能力目录")
+	abilityDir := flag.String("abilities", "", "可选的声明式能力目录")
 	systemVoice := flag.Bool("system-voice", false, "启用本机原生播报和 WAV 语音入口")
 	wakeSocket := flag.String("oh2p-wake-socket", "", "OH2P 本地唤醒事件套接字")
 	wakeDetector := flag.String("oh2p-wake-detector", "", "OH2P 本地唤醒检测器程序")
@@ -515,31 +515,36 @@ func main() {
 		log.Fatal(err)
 	}
 	// Install packaged capabilities only when absent; preserve user edits and enablement.
-	files, err := filepath.Glob(filepath.Join(*abilityDir, "*.json"))
-	if err != nil {
-		log.Fatal(err)
+	if *abilityDir != "" {
+		files, err := filepath.Glob(filepath.Join(*abilityDir, "*.json"))
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, file := range files {
+			data, e := os.ReadFile(file)
+			if e != nil {
+				log.Fatal(e)
+			}
+			var m Manifest
+			if e = json.Unmarshal(data, &m); e != nil {
+				log.Fatalf("能力文件格式错误: %s", filepath.Base(file))
+			}
+			if e = validateManifest(m); e != nil {
+				log.Fatalf("能力文件无效: %s: %s", filepath.Base(file), e)
+			}
+			if _, ok := p.snapshot().Abilities[m.ID]; ok {
+				continue
+			}
+			if e = p.change(func(s *State) error {
+				s.Abilities[m.ID] = Ability{Manifest: m, Config: map[string]string{}, Enabled: false}
+				return nil
+			}); e != nil {
+				log.Fatal(e)
+			}
+		}
 	}
-	for _, file := range files {
-		data, e := os.ReadFile(file)
-		if e != nil {
-			log.Fatal(e)
-		}
-		var m Manifest
-		if e = json.Unmarshal(data, &m); e != nil {
-			log.Fatalf("能力文件格式错误: %s", filepath.Base(file))
-		}
-		if e = validateManifest(m); e != nil {
-			log.Fatalf("能力文件无效: %s: %s", filepath.Base(file), e)
-		}
-		if _, ok := p.snapshot().Abilities[m.ID]; ok {
-			continue
-		}
-		if e = p.change(func(s *State) error {
-			s.Abilities[m.ID] = Ability{Manifest: m, Config: map[string]string{}, Enabled: false}
-			return nil
-		}); e != nil {
-			log.Fatal(e)
-		}
+	if err := p.migrateLegacyFlows(); err != nil {
+		log.Fatal("无法迁移旧版流程: ", err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -17,6 +18,8 @@ type automationStep struct {
 	Parameters map[string]string `json:"parameters,omitempty"`
 	Next       int               `json:"next,omitempty"`
 	OnTimeout  string            `json:"on_timeout,omitempty"`
+	SaveAs     string            `json:"save_as,omitempty"`
+	Equals     json.RawMessage   `json:"equals,omitempty"`
 }
 
 type automationRun struct {
@@ -29,6 +32,7 @@ type automationRun struct {
 	Phase   string     `json:"phase,omitempty"`
 	Until   *time.Time `json:"until,omitempty"`
 	EventID string     `json:"event_id,omitempty"`
+	ChildID string     `json:"child_task_id,omitempty"`
 	Results []string   `json:"results,omitempty"`
 	Actions []string   `json:"actions,omitempty"`
 }
@@ -67,8 +71,8 @@ func setRuleTime(sc *Schedule, local, tz string, now time.Time) error {
 }
 
 func validateAutomation(s *State, rule automationRule) error {
-	if len(rule.Name) == 0 || len(rule.Name) > 120 || len(rule.Actions) == 0 || len(rule.Actions) > 8 {
-		return errors.New("请填写规则名称并添加 1 至 8 个动作")
+	if len(rule.Name) == 0 || len(rule.Name) > 120 || len(rule.Actions) == 0 || len(rule.Actions) > 64 {
+		return errors.New("请填写规则名称并添加 1 至 64 个动作")
 	}
 	if rule.Condition != "" && rule.Condition != "room_on" && rule.Condition != "room_off" {
 		return errors.New("未知执行条件")
@@ -90,7 +94,16 @@ func validateAutomation(s *State, rule automationRule) error {
 			return errors.New("请选择已授权的 Home Assistant 读取状态工具，并填写要触发的状态")
 		}
 	}
+	variables := map[string]bool{}
 	for i, step := range rule.Actions {
+		for _, text := range step.Parameters {
+			if err := validateAutomationReferences(text, variables); err != nil {
+				return err
+			}
+		}
+		if err := validateAutomationReferences(step.Value, variables); err != nil {
+			return err
+		}
 		switch step.Action {
 		case "room_start", "room_stop":
 		case "http_tool":
@@ -98,15 +111,56 @@ func validateAutomation(s *State, rule automationRule) error {
 			if !ok || !tool.Automation {
 				return errors.New("请选择已授权给自动化的工具")
 			}
-			if _, err := tool.values(step.Parameters); err != nil {
+			args := make(map[string]string, len(step.Parameters))
+			for key, value := range step.Parameters {
+				args[key] = value
+			}
+			for _, param := range tool.Parameters {
+				if automationReference.MatchString(args[param.Name]) {
+					switch param.Type {
+					case "number":
+						args[param.Name] = "0"
+					case "boolean":
+						args[param.Name] = "false"
+					}
+				}
+			}
+			if _, err := tool.values(args); err != nil {
 				return err
 			}
+			if step.SaveAs != "" {
+				if !parameterID.MatchString(step.SaveAs) || variables[step.SaveAs] {
+					return errors.New("结果变量名须是唯一字母、数字或下划线标识符，并以字母或下划线开头")
+				}
+				variables[step.SaveAs] = true
+			}
+		case "if":
+			match := automationReference.FindStringSubmatch("{{" + step.Value + "}}")
+			if len(match) != 2 || match[1] != step.Value {
+				return errors.New("请输入结果变量或字段路径")
+			}
+			if err := validateAutomationReferences(match[0], variables); err != nil {
+				return err
+			}
+			if len(step.Equals) > 1000 {
+				return errors.New("用于比较的值过长")
+			}
+			if _, err := automationScalar(step.Equals); err != nil {
+				return err
+			}
+			if step.Next != 0 && (step.Next <= i+1 || step.Next > len(rule.Actions)) {
+				return errors.New("条件不成立时只能跳到后续步骤")
+			}
+		case "tone":
+			if _, ok := deviceTones[step.Value]; !ok {
+				return errors.New("请选择有效的提示音")
+			}
 		case "wait":
-			if step.Seconds < 1 || step.Seconds > 86400 {
-				return errors.New("等待时间须为 1 至 86400 秒")
+			if step.Seconds < 1 || step.Seconds > 604800 {
+				return errors.New("等待时间须为 1 至 604800 秒")
 			}
 		case "confirm":
-			if step.Seconds < 1 || step.Seconds > 86400 || (step.OnTimeout != "stop" && step.OnTimeout != "continue") ||
+			if step.Seconds < 0 || step.Seconds > 86400 || (step.OnTimeout != "stop" && step.OnTimeout != "continue") ||
 				strings.TrimSpace(step.Value) == "" || len(step.Value) > 1000 {
 				return errors.New("请填写确认提示、等待时间和超时处理")
 			}
@@ -118,8 +172,8 @@ func validateAutomation(s *State, rule automationRule) error {
 				return errors.New("请检查倒计时秒数和名称")
 			}
 		case "speak":
-			if len(strings.TrimSpace(step.Value)) == 0 || len(step.Value) > 1000 {
-				return errors.New("请填写播报内容，最多 1000 字节")
+			if len(strings.TrimSpace(step.Value)) == 0 || len(step.Value) > 4000 {
+				return errors.New("请填写播报内容，最多 4000 字节")
 			}
 		case "flow":
 			ability, ok := s.Abilities[step.Value]
@@ -137,6 +191,30 @@ func validateAutomation(s *State, rule automationRule) error {
 }
 
 func (a *api) automationRoutes(m *http.ServeMux) {
+	m.HandleFunc("POST /api/automation/convert-legacy", func(w http.ResponseWriter, r *http.Request) {
+		var manifest Manifest
+		if err := decode(w, r, &manifest); err != nil {
+			bad(w, err)
+			return
+		}
+		if err := validateManifest(manifest); err != nil {
+			bad(w, err)
+			return
+		}
+		values := map[string]string{}
+		for _, field := range manifest.Fields {
+			values[field.Key] = field.Default
+			if field.Required && field.Default == "" {
+				values[field.Key] = "〔填写" + field.Label + "〕"
+			}
+		}
+		steps, err := convertLegacyFlow(manifest, values)
+		if err != nil {
+			bad(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"name": manifest.Name, "trigger": "manual", "actions": steps})
+	})
 	save := func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Name      string           `json:"name"`
@@ -224,8 +302,12 @@ func (a *api) automationRoutes(m *http.ServeMux) {
 				bad(w, err)
 				return
 			}
-			clockResponse(w, a.platform.changeAutomationRun(id, in.Run, func(_ *State, run *automationRun) error {
-				if run.Phase != "wait" && run.Phase != "confirm" {
+			clockResponse(w, a.platform.changeAutomationRun(id, in.Run, func(s *State, run *automationRun) error {
+				if run.Phase == "child" {
+					if err := taskAction(s, run.ChildID, "cancel", now); err != nil {
+						return err
+					}
+				} else if run.Phase != "wait" && run.Phase != "confirm" {
 					return errors.New("当前步骤正在执行，请等候结果")
 				}
 				run.Status = "cancelled"
@@ -309,6 +391,21 @@ func (p *Platform) runAutomation(now time.Time, room *roomAudio) error {
 		if running || due {
 			if err := p.advanceAutomation(now, room, rule.ID); err != nil {
 				return err
+			}
+		}
+	}
+	if len(p.automationValues) > 0 {
+		p.mu.Lock()
+		active := map[string]bool{}
+		for _, rule := range p.state.Rules {
+			if len(rule.Runs) > 0 && rule.Runs[0].Status == "running" {
+				active[rule.Runs[0].ID] = true
+			}
+		}
+		p.mu.Unlock()
+		for id := range p.automationValues {
+			if !active[id] {
+				delete(p.automationValues, id)
 			}
 		}
 	}
@@ -502,7 +599,7 @@ var errAutomationFinished = errors.New("流程已经结束")
 
 func finishAutomationStep(run *automationRun, result string, count int) {
 	run.Results = append(run.Results, result)
-	run.Phase, run.EventID, run.Until = "", "", nil
+	run.Phase, run.EventID, run.ChildID, run.Until = "", "", "", nil
 	if run.Step == count {
 		run.Status = "completed"
 	} else {
@@ -531,6 +628,15 @@ func (p *Platform) advanceAutomation(now time.Time, room *roomAudio, id string) 
 			}
 			return err
 		}
+		fail := func(err error) error {
+			return update(func(_ *State, live *automationRun) error {
+				live.Status, live.Error = "failed", err.Error()
+				live.Results = append(live.Results, "执行失败")
+				return nil
+			})
+		}
+		values := p.automationValues[run.ID]
+
 		switch run.Phase {
 		case "action":
 			return update(func(_ *State, live *automationRun) error {
@@ -538,8 +644,20 @@ func (p *Platform) advanceAutomation(now time.Time, room *roomAudio, id string) 
 				live.Results = append(live.Results, "结果未知")
 				return nil
 			})
+		case "child":
+			index := slices.IndexFunc(s.Tasks, func(t Task) bool { return t.ID == run.ChildID })
+			if index < 0 || s.Tasks[index].Status == "cancelled" {
+				return fail(errors.New("旧版子流程已取消或不存在"))
+			}
+			if s.Tasks[index].Status != "done" {
+				return nil
+			}
+			return update(func(_ *State, live *automationRun) error {
+				finishAutomationStep(live, "子流程已完成", count)
+				return nil
+			})
 		case "wait", "confirm":
-			if now.Before(*run.Until) {
+			if run.Until == nil || now.Before(*run.Until) {
 				return nil
 			}
 			return update(func(_ *State, live *automationRun) error {
@@ -565,15 +683,60 @@ func (p *Platform) advanceAutomation(now time.Time, room *roomAudio, id string) 
 					live.Status, live.Error = "failed", "音箱未能播报此步骤"
 					live.Results = append(live.Results, "播报失败")
 				} else if step.Action == "confirm" {
-					until := now.Add(time.Duration(step.Seconds) * time.Second)
-					live.Phase, live.Until = "confirm", &until
+					live.Phase = "confirm"
+					if step.Seconds > 0 {
+						until := now.Add(time.Duration(step.Seconds) * time.Second)
+						live.Until = &until
+					}
 				} else {
 					finishAutomationStep(live, "已播报", count)
 				}
 				return nil
 			})
 		}
-		if step.Action == "speak" || step.Action == "confirm" || step.Action == "wait" {
+		if step.Action == "flow" {
+			return update(func(s *State, live *automationRun) error {
+				child, err := startTask(s, step.Value, nil, now)
+				if err != nil {
+					live.Status, live.Error = "failed", err.Error()
+					live.Results = append(live.Results, "执行失败")
+				} else {
+					live.Phase, live.ChildID = "child", child
+				}
+				return nil
+			})
+		}
+		if step.Action == "if" {
+			value, err := automationValue(values, step.Value)
+			if err != nil {
+				return fail(err)
+			}
+			match, err := equalAutomationValues(value, step.Equals)
+			if err != nil {
+				return fail(err)
+			}
+			return update(func(_ *State, live *automationRun) error {
+				if match {
+					finishAutomationStep(live, "条件成立", count)
+					return nil
+				}
+				finishAutomationStep(live, "条件不成立", count)
+				target := step.Next
+				if target == 0 {
+					target = count + 1
+				}
+				for live.Status == "running" && live.Step < target {
+					finishAutomationStep(live, "已跳过", count)
+				}
+				return nil
+			})
+		}
+		text, err := expandAutomationText(step.Value, values)
+		if err != nil {
+			return fail(err)
+		}
+		step.Value = text
+		if step.Action == "speak" || step.Action == "confirm" || step.Action == "wait" || step.Action == "tone" {
 			return update(func(s *State, live *automationRun) error {
 				switch {
 				case step.Action == "wait":
@@ -583,7 +746,11 @@ func (p *Platform) advanceAutomation(now time.Time, room *roomAudio, id string) 
 					live.Status, live.Error = "failed", "音箱播报未启用"
 					live.Results = append(live.Results, "播报不可用")
 				default:
-					emit(s, &Task{ID: live.ID}, "speech", step.Value, now)
+					kind := "speech"
+					if step.Action == "tone" {
+						kind = "tone"
+					}
+					emit(s, &Task{ID: live.ID}, kind, step.Value, now)
 					live.Phase, live.EventID = "speech", s.Events[len(s.Events)-1].ID
 				}
 				return nil
@@ -598,8 +765,29 @@ func (p *Platform) advanceAutomation(now time.Time, room *roomAudio, id string) 
 			return err
 		}
 		run.Phase = "action"
-		err := p.runAutomationStep(room, step, now)
-		return update(func(_ *State, live *automationRun) error {
+		var result networkToolResult
+		if step.Action == "http_tool" {
+			args := make(map[string]string, len(step.Parameters))
+			for key, value := range step.Parameters {
+				args[key], err = expandAutomationText(value, values)
+				if err != nil {
+					return fail(err)
+				}
+			}
+			result, err = p.automationTool(step.Value, args)
+			if err == nil && step.SaveAs != "" {
+				size := len(result.Value)
+				for _, existing := range values {
+					size += len(existing)
+				}
+				if size > automationValueBudget {
+					err = errors.New("工具结果超过流程变量容量，请选取所需字段")
+				}
+			}
+		} else {
+			err = p.runAutomationStep(room, step, now)
+		}
+		updateErr := update(func(_ *State, live *automationRun) error {
 			if err != nil {
 				live.Status, live.Error = "failed", err.Error()
 				live.Results = append(live.Results, "执行失败")
@@ -611,20 +799,31 @@ func (p *Platform) advanceAutomation(now time.Time, room *roomAudio, id string) 
 				if step.Action == "room_start" {
 					result = "已请求连接音源"
 				}
-				if step.Action == "flow" {
-					result = "已启动流程"
+				if step.SaveAs != "" {
+					result = "已保存变量 " + step.SaveAs
 				}
 				finishAutomationStep(live, result, count)
 			}
 			return nil
 		})
+		if updateErr == nil && err == nil && step.Action == "http_tool" && step.SaveAs != "" {
+			if p.automationValues == nil {
+				p.automationValues = map[string]map[string]json.RawMessage{}
+			}
+			if values == nil {
+				values = map[string]json.RawMessage{}
+				p.automationValues[run.ID] = values
+			}
+			values[step.SaveAs] = result.Value
+		}
+		return updateErr
 	}
 	return nil
 }
 
 func (p *Platform) confirmAutomation(id, runID string, step int, now time.Time) error {
 	return p.changeAutomationRun(id, runID, func(s *State, run *automationRun) error {
-		if run.Step != step || run.Phase != "confirm" || run.Until == nil || !now.Before(*run.Until) {
+		if run.Step != step || run.Phase != "confirm" || run.Until != nil && !now.Before(*run.Until) {
 			return errors.New("此步骤已变更或确认超时")
 		}
 		for _, rule := range s.Rules {
@@ -653,7 +852,7 @@ func (p *Platform) automationVoiceConfirmation(text string, now time.Time) (voic
 			continue
 		}
 		run := rule.Runs[0]
-		if run.Status != "running" || run.Phase != "confirm" || run.Until == nil || !now.Before(*run.Until) {
+		if run.Status != "running" || run.Phase != "confirm" || run.Until != nil && !now.Before(*run.Until) {
 			continue
 		}
 		if waiting != nil {
@@ -669,15 +868,19 @@ func (p *Platform) automationVoiceConfirmation(text string, now time.Time) (voic
 	return voiceTaskReply{handled: true, text: "继续。"}, err
 }
 
+func (p *Platform) automationTool(id string, args map[string]string) (networkToolResult, error) {
+	s := p.snapshot()
+	tool, ok := findNetworkTool(&s, id)
+	if !ok || !tool.Automation {
+		return networkToolResult{}, errors.New("该工具已停用或撤销自动化授权")
+	}
+	return p.networkToolValue(context.Background(), s, tool, args)
+}
+
 func (p *Platform) runAutomationStep(room *roomAudio, action automationStep, now time.Time) error {
 	switch action.Action {
 	case "http_tool":
-		s := p.snapshot()
-		tool, ok := findNetworkTool(&s, action.Value)
-		if !ok || !tool.Automation {
-			return errors.New("该工具已停用或撤销自动化授权")
-		}
-		_, err := p.runNetworkTool(context.Background(), s, tool, action.Parameters)
+		_, err := p.automationTool(action.Value, action.Parameters)
 		return err
 	case "room_start":
 		_, err := room.start(p)
@@ -695,8 +898,6 @@ func (p *Platform) runAutomationStep(room *roomAudio, action automationStep, now
 			name = action.Value + "，计时结束。"
 		}
 		return p.scheduleVoiceTask(quickTimer.ID, name, time.Duration(action.Seconds)*time.Second, now)
-	case "flow":
-		return p.change(func(s *State) error { _, err := startTask(s, action.Value, nil, now); return err })
 	default:
 		return errors.New("未知自动化动作")
 	}

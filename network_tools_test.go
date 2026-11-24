@@ -190,7 +190,7 @@ func TestWeatherTemplateFixedQueryAndUnits(t *testing.T) {
 	if err := tool.validate(); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := (&Platform{}).executeNetworkTool(context.Background(), State{}, tool, nil, ""); err != nil || got != "19 °C" {
+	if got, err := (&Platform{}).executeNetworkTool(context.Background(), State{}, tool, nil, ""); err != nil || got.text != "19 °C" || string(got.Value) != "19" {
 		t.Fatalf("%q %v", got, err)
 	}
 	tool.Endpoint += "&api_key=fixture"

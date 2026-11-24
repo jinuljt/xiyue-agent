@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -74,27 +75,58 @@ func boundedText(text string, limit int) string {
 	return string(rs[:min(limit, len(rs))])
 }
 
-func selectNetworkResult(data []byte, field string) (string, error) {
+func selectNetworkValue(data []byte, field string) (json.RawMessage, error) {
+	data = bytes.TrimSpace(data)
+	if !json.Valid(data) {
+		if field != "" {
+			return nil, errors.New("接口没有返回有效 JSON")
+		}
+		return json.Marshal(string(data))
+	}
+	value := json.RawMessage(data)
 	if field == "" {
-		return boundedText(string(data), 2500), nil
+		return value, nil
 	}
-	var result any
-	if err := json.Unmarshal(data, &result); err != nil {
-		return "", errors.New("接口没有返回有效 JSON")
-	}
-	for _, part := range strings.Split(field, ".") {
-		object, ok := result.(map[string]any)
-		if !ok {
-			return "", errors.New("未找到所配置的返回字段")
-		}
-		result, ok = object[part]
-		if !ok {
-			return "", errors.New("未找到所配置的返回字段")
+	parts := strings.Split(field, ".")
+	if strings.HasPrefix(field, "/") {
+		parts = strings.Split(field[1:], "/")
+		for i, part := range parts {
+			parts[i] = strings.ReplaceAll(strings.ReplaceAll(part, "~1", "/"), "~0", "~")
 		}
 	}
-	if text, ok := result.(string); ok {
-		return boundedText(text, 2500), nil
+	for _, part := range parts {
+		next := json.RawMessage(nil)
+		switch value[0] {
+		case '{':
+			var object map[string]json.RawMessage
+			if json.Unmarshal(value, &object) == nil {
+				next = object[part]
+			}
+		case '[':
+			var list []json.RawMessage
+			i, err := strconv.Atoi(part)
+			if err == nil && i >= 0 && json.Unmarshal(value, &list) == nil && i < len(list) {
+				next = list[i]
+			}
+		}
+		if len(next) == 0 {
+			return nil, errors.New("未找到所配置的返回字段")
+		}
+		value = next
 	}
-	out, err := json.Marshal(result)
-	return boundedText(string(out), 2500), err
+	return value, nil
+}
+
+func networkValueText(value json.RawMessage) string {
+	if len(value) > 0 && value[0] == '"' {
+		var text string
+		if json.Unmarshal(value, &text) == nil {
+			return boundedText(text, 2500)
+		}
+	}
+	var compact bytes.Buffer
+	if json.Compact(&compact, value) == nil {
+		return boundedText(compact.String(), 2500)
+	}
+	return ""
 }
