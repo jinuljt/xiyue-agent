@@ -546,6 +546,9 @@ func main() {
 	if err := p.migrateLegacyFlows(); err != nil {
 		log.Fatal("无法迁移旧版流程: ", err)
 	}
+	if err := p.installRuleExamples(); err != nil {
+		log.Fatal("无法安装预置流程: ", err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	defer func() { _ = p.activity.flush() }()

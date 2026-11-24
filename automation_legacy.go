@@ -70,7 +70,7 @@ func (p *Platform) migrateLegacyFlows() error {
 				continue
 			}
 			values, err := configValues(ability, nil)
-			if err != nil || len(s.Rules) >= 32 {
+			if err != nil || len(s.Rules) >= maxAutomationRules {
 				s.LegacyFlows = append(s.LegacyFlows, id)
 				continue
 			}

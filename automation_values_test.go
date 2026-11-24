@@ -99,6 +99,72 @@ func TestNetworkResponseRetainsJSONType(t *testing.T) {
 	}
 }
 
+func TestInstallRuleExamples(t *testing.T) {
+	for _, upgrade := range []bool{false, true} {
+		t.Run(fmt.Sprintf("upgrade=%t", upgrade), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			p, err := openPlatform(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if upgrade {
+				err = p.change(func(s *State) error {
+					s.Rules = []automationRule{{
+						ID: "mine", Name: "休息 1 分钟", Trigger: "manual",
+						Actions: []automationStep{{Action: "wait", Seconds: 45}},
+					}}
+					return nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := p.installRuleExamples(); err != nil {
+				t.Fatal(err)
+			}
+			state := p.snapshot()
+			if len(state.Rules) != 2 {
+				t.Fatalf("expected two flows, got %d", len(state.Rules))
+			}
+			rest, pomodoro := state.Rules[0], state.Rules[1]
+			if upgrade {
+				if rest.ID != "mine" || rest.Schedule.Enabled || len(rest.Actions) != 1 || rest.Actions[0].Seconds != 45 {
+					t.Fatal("pre-existing same-name flow changed")
+				}
+			} else if rest.Name != "休息 1 分钟" || !rest.Schedule.Enabled || len(rest.Actions) != 3 || rest.Actions[1].Seconds != 60 {
+				t.Fatal("rest flow is incomplete")
+			}
+			if pomodoro.Name != "番茄工作法" || !pomodoro.Schedule.Enabled || len(pomodoro.Actions) != 5 ||
+				pomodoro.Actions[1].Seconds != 1500 || pomodoro.Actions[3].Seconds != 300 {
+				t.Fatal("pomodoro flow is incomplete")
+			}
+			for _, rule := range state.Rules {
+				if rule.Trigger != "manual" || !rule.Schedule.NextAt.IsZero() || len(rule.Runs) != 0 {
+					t.Fatalf("flow is not idle and manual: %s", rule.Name)
+				}
+			}
+			if err := p.change(func(s *State) error {
+				s.Rules = s.Rules[:1]
+				s.Rules[0].Name = "我的休息"
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := openPlatform(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := reopened.installRuleExamples(); err != nil {
+				t.Fatal(err)
+			}
+			rules := reopened.snapshot().Rules
+			if len(rules) != 1 || rules[0].ID != rest.ID || rules[0].Name != "我的休息" {
+				t.Fatal("reopening should preserve edits and deletions")
+			}
+		})
+	}
+}
+
 func TestMigrationKeepsLegacyDependenciesAndHistory(t *testing.T) {
 	p, err := openPlatform(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {

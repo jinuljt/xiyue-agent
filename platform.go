@@ -82,6 +82,7 @@ type State struct {
 	HomeAssistant string            `json:"home_assistant,omitempty"`
 	HTTPTools     []networkTool     `json:"http_tools,omitempty"`
 	HTTPExample   bool              `json:"http_example_installed,omitempty"`
+	RuleExamples  bool              `json:"rule_examples_installed,omitempty"`
 	Features      map[string]bool   `json:"features,omitempty"`
 	FlowMigration bool              `json:"flow_migration,omitempty"`
 	LegacyFlows   []string          `json:"legacy_flows,omitempty"`

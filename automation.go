@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const maxAutomationRules = 32
+
 type automationStep struct {
 	Action     string            `json:"action"`
 	Value      string            `json:"value,omitempty"`
@@ -49,6 +51,45 @@ type automationRule struct {
 	Before    string           `json:"before,omitempty"`
 	Actions   []automationStep `json:"actions"`
 	Runs      []automationRun  `json:"runs,omitempty"`
+}
+
+func (p *Platform) installRuleExamples() error {
+	if p.state.RuleExamples {
+		return nil
+	}
+	examples := []automationRule{
+		{Name: "休息 1 分钟", Actions: []automationStep{
+			{Action: "speak", Value: "起来活动一下。"},
+			{Action: "wait", Seconds: 60},
+			{Action: "speak", Value: "休息结束。"},
+		}},
+		{Name: "番茄工作法", Actions: []automationStep{
+			{Action: "speak", Value: "开始专注。"},
+			{Action: "wait", Seconds: 25 * 60},
+			{Action: "speak", Value: "专注结束，休息一下。"},
+			{Action: "wait", Seconds: 5 * 60},
+			{Action: "speak", Value: "休息结束，这一轮番茄钟完成。"},
+		}},
+	}
+	return p.change(func(s *State) error {
+		for _, example := range examples {
+			if len(s.Rules) >= maxAutomationRules {
+				break
+			}
+			if slices.ContainsFunc(s.Rules, func(rule automationRule) bool { return rule.Name == example.Name }) {
+				continue
+			}
+			example.ID = newID()
+			example.Trigger = "manual"
+			example.Schedule = Schedule{Enabled: true, Timezone: s.Settings.Timezone}
+			if err := validateAutomation(s, example); err != nil {
+				return err
+			}
+			s.Rules = append(s.Rules, example)
+		}
+		s.RuleExamples = true
+		return nil
+	})
 }
 
 func setRuleTime(sc *Schedule, local, tz string, now time.Time) error {
@@ -265,7 +306,7 @@ func (a *api) automationRoutes(m *http.ServeMux) {
 				}
 				return errors.New("规则不存在")
 			}
-			if len(s.Rules) >= 32 {
+			if len(s.Rules) >= maxAutomationRules {
 				return errors.New("最多可保存 32 条规则")
 			}
 			s.Rules = append(s.Rules, rule)
