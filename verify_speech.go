@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"time"
 )
 
 const testSpokenText = "你好，这是一条喜悦的语音测试。"
 
-func (a *api) verifySpeech(w http.ResponseWriter, r *http.Request, s State, service string, temporary *string) {
+func (a *api) verifySpeech(w http.ResponseWriter, r *http.Request, s State, service, language string, temporary *string) {
 	if a.admin != nil && r.Header.Get("Origin") == "" {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "请从音箱控制台发起验证"})
 		return
@@ -27,6 +28,16 @@ func (a *api) verifySpeech(w http.ResponseWriter, r *http.Request, s State, serv
 	} else if !ttsReady(v, s) {
 		bad(w, errors.New("请选择可用的音箱播报方式，并填写所需凭证和音色"))
 		return
+	}
+	sample := testSpokenText
+	if service == "tts" && language != "" {
+		var err error
+		sample, err = speechSample(language)
+		// System audio has no language selector. An explicit preview requests raw text for testing.
+		if err != nil || (s.Settings.TTS.Provider != "system" && !slices.Contains(supportedReplyLanguages(s.Settings.TTS), language)) {
+			bad(w, errors.New("当前服务或音色不支持这个试听语种"))
+			return
+		}
 	}
 	v.mu.Lock()
 	if v.active {
@@ -56,7 +67,7 @@ func (a *api) verifySpeech(w http.ResponseWriter, r *http.Request, s State, serv
 			return
 		}
 		result["text"] = text
-	} else if err := a.platform.playSpeechWithKey(ctx, v, s, testSpokenText, temporary, true); err != nil {
+	} else if err := a.platform.playSpeechWithKey(ctx, v, s, sample, language, temporary, true); err != nil {
 		bad(w, err)
 		return
 	}

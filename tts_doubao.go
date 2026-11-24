@@ -34,16 +34,16 @@ func playALSA(ctx context.Context, device string, audio io.Reader) error {
 func ttsReady(v *voiceRuntime, s State) bool {
 	cfg := s.Settings.TTS
 	return v != nil && ((cfg.Provider == "system" && v.speak != nil) ||
-		(cfg.Provider == "doubao" && v.playPCM != nil && cfg.Model != "" && cfg.Endpoint == "" && cfg.KeyConfigured))
+		((cfg.Provider == "doubao" || cfg.Provider == "deepseek") && v.playPCM != nil && cfg.Model != "" && cfg.Endpoint == "" && cfg.KeyConfigured))
 }
 
 func (p *Platform) playConfiguredSpeech(ctx context.Context, v *voiceRuntime, s State, text string) error {
-	return p.playSpeechWithKey(ctx, v, s, text, nil, false)
+	return p.playSpeechWithKey(ctx, v, s, text, "", nil, false)
 }
 
-func (p *Platform) playSpeechWithKey(ctx context.Context, v *voiceRuntime, s State, text string, temporary *string, test bool) error {
+func (p *Platform) playSpeechWithKey(ctx context.Context, v *voiceRuntime, s State, text, language string, temporary *string, test bool) error {
 	if !ttsReady(v, s) {
-		return errors.New("请配置系统语音或可用的豆包语音合成服务")
+		return errors.New("请配置可用的语音合成服务")
 	}
 	ctx, finish, err := v.startPlayback(ctx)
 	if err != nil {
@@ -64,12 +64,18 @@ func (p *Platform) playSpeechWithKey(ctx context.Context, v *voiceRuntime, s Sta
 		return err
 	}
 	start := time.Now()
-	err = doubaoSpeech(ctx, doubaoTTSEndpoint, s.Settings.TTS.Model, key, text, v.playPCM)
+	cfg := s.Settings.TTS
+	count := int64(utf8.RuneCountInString(strings.TrimSpace(text)))
+	if cfg.Provider == "deepseek" {
+		err = deepseekSpeech(ctx, deepseekTTSEndpoint, cfg.Model, key, text, v.playPCM)
+		count = deepseekCharacters(text)
+	} else {
+		err = doubaoSpeech(ctx, doubaoTTSEndpoint, cfg.Model, key, text, v.playPCM, language)
+	}
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	}
 	if size := len(strings.TrimSpace(text)); size > 0 && size <= 4096 {
-		count := int64(utf8.RuneCountInString(strings.TrimSpace(text)))
 		u := UsageRecord{ID: newID(), Service: "tts", Provider: s.Settings.TTS.Provider, Model: s.Settings.TTS.Model, At: start.UTC(),
 			ConfigRevision: s.Settings.Revision, DurationMS: time.Since(start).Milliseconds(), Success: err == nil, Test: test, Characters: &count}
 		if err != nil {
@@ -80,14 +86,17 @@ func (p *Platform) playSpeechWithKey(ctx context.Context, v *voiceRuntime, s Sta
 	return err
 }
 
-func doubaoSpeech(ctx context.Context, endpoint, speaker, key, text string, play pcmPlayer) error {
+func doubaoSpeech(ctx context.Context, endpoint, speaker, key, text string, play pcmPlayer, languages ...string) error {
 	text = strings.TrimSpace(text)
 	if len(text) == 0 || len(text) > 4096 {
 		return errors.New("播报文字为空或过长")
 	}
-	body, err := json.Marshal(map[string]any{"req_params": map[string]any{
-		"text": text, "speaker": speaker, "audio_params": map[string]any{"format": "pcm", "sample_rate": 24000},
-	}})
+	params := map[string]any{"text": text, "speaker": speaker, "audio_params": map[string]any{"format": "pcm", "sample_rate": 24000}}
+	if len(languages) > 0 && languages[0] != "" && languages[0] != "zh" {
+		additions, _ := json.Marshal(map[string]string{"explicit_language": strings.ToLower(languages[0])})
+		params["additions"] = string(additions)
+	}
+	body, err := json.Marshal(map[string]any{"req_params": params})
 	if err != nil {
 		return err
 	}

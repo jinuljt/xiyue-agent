@@ -207,10 +207,10 @@ func (p *Platform) runDeviceWake(ctx context.Context, v *voiceRuntime, capture v
 	v.conversing = true
 	v.mu.Unlock()
 	defer func() { v.mu.Lock(); v.conversing = false; v.mu.Unlock() }()
-	var history []voiceMessage
+	var dialogue dialogueSession
 	first := true
 	for ctx.Err() == nil {
-		result, err := p.runSpeechTurn(ctx, v, capture, setLED, &history, first)
+		result, err := p.runSpeechTurn(ctx, v, capture, setLED, &dialogue, first)
 		if err != nil || result.Stage != "completed" {
 			return
 		}

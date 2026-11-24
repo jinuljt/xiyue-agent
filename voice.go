@@ -397,7 +397,7 @@ func (p *Platform) runVoiceTurn(parent context.Context, v *voiceRuntime, capture
 	return p.runSpeechTurn(parent, v, capture, captureLED, nil, false)
 }
 
-func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, capture voiceCapture, captureLED func(bool), history *[]voiceMessage, cue bool) (result voiceResult, err error) {
+func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, capture voiceCapture, captureLED func(bool), dialogue *dialogueSession, cue bool) (result voiceResult, err error) {
 	v.mu.Lock()
 	if v.active {
 		v.mu.Unlock()
@@ -405,7 +405,7 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 	}
 	ctx, cancel := context.WithTimeout(parent, 50*time.Second)
 	v.active, v.cancel = true, cancel
-	v.following = history != nil && !cue
+	v.following = dialogue != nil && !cue
 	v.mu.Unlock()
 	var transcript, response string
 	defer func() {
@@ -482,28 +482,35 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 	}
 	if !ttsReady(v, s) {
 		result.Stage = "configuration"
-		return result, errors.New("请配置系统语音或可用的豆包语音合成服务")
+		return result, errors.New("请配置可用的语音合成服务")
 	}
 	result.Stage = "local_task"
-	question := activeQuestion(s, time.Now().UTC())
+	practice := dialogue != nil && dialogue.practice && s.Settings.PracticeEnabled && s.Settings.supportsPractice("en")
+	var question *Event
+	if !practice {
+		question = activeQuestion(s, time.Now().UTC())
+	}
 	var taskReply voiceTaskReply
-	if question == nil {
+	if !practice && question == nil {
 		taskReply, err = p.voiceTask(command, time.Now().UTC())
 	}
 	if err != nil {
 		taskReply = voiceTaskReply{text: "这次没执行成功，请稍后再试。", handled: true}
 	}
 	reply := taskReply.text
+	language := "zh"
+	nextPractice := practice
+	clearHistory := dialogue != nil && dialogue.practice != practice
 	if !taskReply.handled {
 		result.modelUsed = true
 		result.Stage = "model"
 		start := time.Now()
 		var previous []voiceMessage
-		if history != nil {
-			previous = *history
+		if dialogue != nil && dialogue.practice == practice {
+			previous = dialogue.history
 		}
 		var plan voicePlan
-		reply, err = p.voiceReply(ctx, s, text, replyOptions{history: previous, voicePlan: &plan, question: question})
+		reply, err = p.voiceReply(ctx, s, text, replyOptions{history: previous, voicePlan: &plan, question: question, practice: practice, dialogueInstructions: dialoguePrompt(s.Settings, practice)})
 		result.ModelMS = time.Since(start).Milliseconds()
 		if err != nil {
 			return result, err
@@ -513,19 +520,41 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 				result.Stage = "conversation_ended"
 				return result, nil
 			}
-			plan = voicePlan{Action: "speak", Speech: "想结束时，直接说今天先这样就可以。"}
+			plan = voicePlan{Action: "speak", Speech: "想结束时，直接说今天先这样就可以。", Language: "zh"}
 		}
-		if plan.Action == "next_step" && question != nil {
+		switch {
+		case plan.Action == "start_practice":
+			if dialogue == nil || !s.Settings.PracticeEnabled || !s.Settings.supportsPractice("en") || strings.TrimSpace(plan.Speech) == "" {
+				reply = "请先在控制台启用可用的英语陪练。"
+			} else {
+				reply, language, nextPractice, clearHistory = plan.Speech, "en", true, true
+			}
+		case plan.Action == "stop_practice" && practice:
+			reply, nextPractice, clearHistory = "已退出英语陪练。", false, true
+		case practice:
+			language = "en"
+			reply = plan.Speech
+			if strings.TrimSpace(reply) == "" || plan.Action != "speak" {
+				reply = "Let's try that again. What would you like to say?"
+			}
+		case plan.Action == "speak":
+			var available bool
+			language, available = selectSpeechLanguage(s.Settings, plan)
+			reply = plan.Speech
+			if !available {
+				language, reply = "zh", "当前语音服务无法播报你选的语言。"
+			}
+		case plan.Action == "next_step" && question != nil:
 			taskReply, err = p.confirmQuestion(*question, time.Now().UTC())
 			reply = taskReply.text
-		} else if plan.Action != "" {
+		case plan.Action != "":
 			taskReply, err = p.applyVoicePlan(plan, command, time.Now().UTC())
 			if err != nil {
 				taskReply = voiceTaskReply{text: "这次没执行成功，请稍后再试。"}
 			}
 			reply = taskReply.text
 		}
-		reply = speechForSpeaker(reply, command)
+		reply = speechForLanguage(reply, command, language)
 	}
 	result.taskID = taskReply.taskID
 	result.Stage = "playback"
@@ -536,17 +565,23 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 		err = v.playTone(cueContext, wakeTone)
 		stop()
 	} else {
-		err = p.playConfiguredSpeech(ctx, v, s, reply)
+		err = p.playSpeechWithKey(ctx, v, s, reply, language, nil, false)
 	}
 	result.PlaybackMS = time.Since(start).Milliseconds()
 	if err != nil {
 		return result, err
 	}
 	result.Stage = "completed"
-	if history != nil {
-		*history = append(*history, voiceMessage{"user", clipDialogue(text)}, voiceMessage{"assistant", clipDialogue(reply)})
-		if len(*history) > 8 {
-			*history = (*history)[len(*history)-8:]
+	if dialogue != nil {
+		dialogue.practice = nextPractice
+		if clearHistory {
+			dialogue.history = nil
+		}
+		if !clearHistory || nextPractice {
+			dialogue.history = append(dialogue.history, voiceMessage{"user", clipDialogue(text)}, voiceMessage{"assistant", clipDialogue(reply)})
+			if len(dialogue.history) > 8 {
+				dialogue.history = dialogue.history[len(dialogue.history)-8:]
+			}
 		}
 	}
 	return result, nil

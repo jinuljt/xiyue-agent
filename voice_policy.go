@@ -12,6 +12,7 @@ import (
 
 const speakerInstructions = `你是喜悦 Voice 音箱的语音助手。根据用户这一轮的完整意图，仅返回一个 JSON 对象，不要使用代码块：
 {"action":"speak","speech":"可以直接播报的文字"}
+默认用普通话，后续语言设置优先。用户明确要求其它语言回答时，在 speak 结果加 language 字段（如 en 或 ja），由音箱核对支持情况。
 语音先说结论，日常默认一两句，目标约 8 秒。省略寒暄、复述、套话、Markdown 和括号旁白。用户明确要求详细说明时可分短句展开。保留重要数字、单位和条件。
 用户确实想结束当前对话时返回 {"action":"end"}。引用、询问退出方式、拒绝某个操作后继续提问，均继续正常对话。
 用户明确要求设置倒计时时返回 {"action":"countdown","seconds":秒数}。明确要求在一段时间后提醒时返回 {"action":"reminder","seconds":秒数,"content":"要提醒的事情"}。参数缺失时只用 speak 简短追问缺的参数。用户明确确认继续当前已暂停等待确认的步骤时返回 {"action":"next_step"}。
@@ -28,6 +29,7 @@ type voicePlan struct {
 	Content   string            `json:"content,omitempty"`
 	Tool      string            `json:"tool,omitempty"`
 	Arguments map[string]string `json:"arguments,omitempty"`
+	Language  string            `json:"language,omitempty"`
 }
 
 func parseVoicePlan(reply string) (voicePlan, error) {
@@ -45,7 +47,7 @@ func parseVoicePlan(reply string) (voicePlan, error) {
 		return voicePlan{}, errors.New("语音回复格式无效")
 	}
 	switch plan.Action {
-	case "speak", "end", "countdown", "reminder", "next_step", "tool":
+	case "speak", "end", "countdown", "reminder", "next_step", "tool", "start_practice", "stop_practice":
 		return plan, nil
 	default:
 		return voicePlan{}, errors.New("语音回复动作无效")
@@ -79,11 +81,18 @@ func (p *Platform) applyVoicePlan(plan voicePlan, request string, now time.Time)
 }
 
 func speechForSpeaker(text, request string) string {
+	return speechForLanguage(text, request, "zh")
+}
+
+func speechForLanguage(text, request, language string) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return "我没听明白，请再说一遍。"
 	}
 	maxSentences, maxRunes := 2, 56
+	if language != "zh" {
+		maxSentences, maxRunes = 3, 240
+	}
 	if detailedSpeech.MatchString(request) {
 		maxSentences, maxRunes = 6, 320
 	}
@@ -115,6 +124,13 @@ func speechForSpeaker(text, request string) string {
 	}
 	if lastEnd > 0 {
 		return strings.TrimSpace(text[:lastEnd])
+	}
+	if language != "zh" {
+		part := string([]rune(text)[:maxRunes])
+		if n := strings.LastIndex(part, " "); n > len(part)/2 {
+			part = part[:n]
+		}
+		return part
 	}
 	return "这段内容比较长，你想先听哪一部分？"
 }

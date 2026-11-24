@@ -245,6 +245,11 @@ func builtinUsageRate(u UsageRecord) (usageRate, bool) {
 	case u.Service == "asr" && u.Provider == "doubao" && u.Model == doubaoASRResource:
 		price := 1.0
 		rate.PerAudioHour = &price
+	case u.Service == "tts" && u.Provider == "deepseek":
+		price := 3.0
+		rate.Per10kChars = &price
+		rate.Source = "DeepSeek 语音合成官方刊例价（未计限时折扣）"
+		rate.UpdatedAt = time.Date(2026, time.November, 24, 0, 0, 0, 0, time.UTC)
 	case u.Service == "tts" && u.Provider == "doubao":
 		price := 3.0
 		rate.Per10kChars = &price

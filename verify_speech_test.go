@@ -44,9 +44,13 @@ func TestSpeechVerificationUsesDraftConfigurationAndSpeaker(t *testing.T) {
 		captures++
 		return fixtureWAV(), nil
 	}}).routes()
-	call := func(service string, input ServiceInput) *httptest.ResponseRecorder {
+	call := func(service string, input ServiceInput, languages ...string) *httptest.ResponseRecorder {
 		t.Helper()
-		body, _ := json.Marshal(map[string]any{"service": service, "config": input})
+		payload := map[string]any{"service": service, "config": input}
+		if len(languages) > 0 {
+			payload["language"] = languages[0]
+		}
+		body, _ := json.Marshal(payload)
 		req := httptest.NewRequest("POST", "http://127.0.0.1/api/settings/verify", strings.NewReader(string(body)))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Xiyue-Request", "console")
@@ -63,6 +67,9 @@ func TestSpeechVerificationUsesDraftConfigurationAndSpeaker(t *testing.T) {
 	}
 	if w := call("tts", ServiceInput{Provider: "system"}); w.Code != 200 || spoken != testSpokenText {
 		t.Fatalf("TTS verification did not use the speaker: %d %s", w.Code, w.Body.String())
+	}
+	if w := call("tts", ServiceInput{Provider: "system"}, "en"); w.Code != 200 || spoken != "Could I have a cup of coffee, please?" {
+		t.Fatal("system preview did not pass through the English sample")
 	}
 	v.active = true
 	if w := call("tts", ServiceInput{Provider: "system"}); w.Code != 409 {
