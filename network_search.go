@@ -120,3 +120,30 @@ func (p *Platform) webTool(ctx context.Context, s State, kind, value, key string
 	p.activity.add(record, s.Settings.Timezone)
 	return result, err
 }
+
+func (p *Platform) searchVoiceTools(s State) []voiceTool {
+	if !s.Search.Enabled {
+		return nil
+	}
+	key, err := p.searchKey(s, s.Search, "")
+	if err != nil {
+		return nil
+	}
+	makeTool := func(action, parameter, description string, emptyResult string) voiceTool {
+		return voiceTool{
+			definition:    voiceToolDefinition{"web_" + action, description, []networkParameter{{parameter, "string"}}},
+			emptyResponse: emptyResult,
+			run: func(ctx context.Context, args map[string]string) (string, error) {
+				value, ok := args[parameter]
+				if !ok || len(args) != 1 {
+					return "", errors.New("搜索参数无效")
+				}
+				return p.webTool(ctx, s, action, value, key, false)
+			},
+		}
+	}
+	return []voiceTool{
+		makeTool("search", "query", "查询需要实时或可核实来源的信息，例如新闻、新品、政策和近期公告", "这次搜索没有找到可用结果。"),
+		makeTool("fetch", "url", "读取用户指定的公开网页地址", ""),
+	}
+}

@@ -13,19 +13,30 @@ type voiceToolDefinition struct {
 	Parameters  []networkParameter `json:"parameters"`
 }
 
+type voiceTool struct {
+	definition    voiceToolDefinition
+	emptyResponse string
+	run           func(context.Context, map[string]string) (string, error)
+}
+
 func (p *Platform) voiceReply(ctx context.Context, s State, message string, options replyOptions) (string, error) {
 	var defs []voiceToolDefinition
-	var searchKey string
-	if s.Search.Enabled {
-		searchKey, _ = p.searchKey(s, s.Search, "")
-		if searchKey != "" {
-			defs = append(defs, voiceToolDefinition{"web_search", "查询需要实时或可核实来源的信息，例如新闻、新品、政策和近期公告", []networkParameter{{"query", "string"}}},
-				voiceToolDefinition{"web_fetch", "读取用户指定的公开网页地址", []networkParameter{{"url", "string"}}})
-		}
+	handlers := map[string]voiceTool{}
+	register := func(tool voiceTool) {
+		defs = append(defs, tool.definition)
+		handlers[tool.definition.ID] = tool
 	}
-	for _, t := range s.HTTPTools {
-		if t.Voice && t.Method == http.MethodGet {
-			defs = append(defs, voiceToolDefinition{t.ID, t.Name + "。" + t.Description, t.Parameters})
+	for _, tool := range p.searchVoiceTools(s) {
+		register(tool)
+	}
+	for _, tool := range s.HTTPTools {
+		if tool.Voice && tool.Method == http.MethodGet {
+			register(voiceTool{
+				definition: voiceToolDefinition{tool.ID, tool.Name + "。" + tool.Description, tool.Parameters},
+				run: func(ctx context.Context, args map[string]string) (string, error) {
+					return p.runNetworkTool(ctx, s, tool, args)
+				},
+			})
 		}
 	}
 	if len(defs) > 0 && !options.practice {
@@ -44,34 +55,17 @@ func (p *Platform) voiceReply(ctx context.Context, s State, message string, opti
 	}
 	const unavailable = "这次无法读取所需的实时信息。"
 	*options.voicePlan = voicePlan{Action: "speak", Language: "zh", Speech: unavailable}
-	var result string
-	switch plan.Tool {
-	case "web_search", "web_fetch":
-		if searchKey == "" {
-			return unavailable, nil
-		}
-		parameter := "query"
-		if plan.Tool == "web_fetch" {
-			parameter = "url"
-		}
-		value, ok := plan.Arguments[parameter]
-		if !ok || len(plan.Arguments) != 1 {
-			return unavailable, nil
-		}
-		result, err = p.webTool(ctx, s, strings.TrimPrefix(plan.Tool, "web_"), value, searchKey, false)
-	default:
-		tool, ok := findNetworkTool(&s, plan.Tool)
-		if !ok || !tool.Voice || tool.Method != http.MethodGet {
-			return unavailable, nil
-		}
-		result, err = p.runNetworkTool(ctx, s, tool, plan.Arguments)
+	execute, ok := handlers[plan.Tool]
+	if !ok {
+		return unavailable, nil
 	}
+	result, err := execute.run(ctx, plan.Arguments)
 	if err != nil || result == "" {
 		return unavailable, nil
 	}
-	if plan.Tool == "web_search" && result == "[]" {
-		options.voicePlan.Speech = "这次搜索没有找到可用结果。"
-		return options.voicePlan.Speech, nil
+	if result == "[]" && execute.emptyResponse != "" {
+		target.Speech = execute.emptyResponse
+		return target.Speech, nil
 	}
 	data, _ := json.Marshal(result)
 	options.toolResult = string(data)
