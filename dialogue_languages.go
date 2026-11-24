@@ -57,9 +57,10 @@ var languageOptions = languageCatalog{
 		},
 	},
 	Presets: map[string][]voicePreset{
-		"doubao": {{doubaoDefaultVoice, "Vivi 2.0"}, {"zh_female_xiaohe_uranus_bigtts", "小何 2.0"}, {"zh_male_m191_uranus_bigtts", "云舟 2.0"}},
+		"doubao":   {{doubaoDefaultVoice, "Vivi 2.0"}, {"zh_female_xiaohe_uranus_bigtts", "小何 2.0"}, {"zh_male_m191_uranus_bigtts", "云舟 2.0"}},
+		"deepseek": {{"stella", "海星"}, {"tide", "暗潮"}},
 	},
-	ASR:      map[string][]string{"doubao": {"zh", "en"}, "sensevoice": {"zh", "en", "ja", "ko", "yue"}},
+	ASR:      map[string][]string{"doubao": {"zh", "en", "yue"}, "sensevoice": {"zh", "en", "ja", "ko", "yue"}},
 	Practice: []string{"en", "ja", "ko", "yue"},
 }
 
@@ -192,22 +193,15 @@ func selectSpeechLanguage(settings SystemConfig, plan voicePlan) (string, bool) 
 }
 
 func voiceDisplayName(config ServiceConfig) string {
-	switch config.Provider {
-	case "system":
+	if config.Provider == "system" {
 		return "音箱系统语音"
-	case "deepseek":
-		if config.Model == "tide" {
-			return "暗潮"
-		}
-		return "海星"
-	default:
-		for _, preset := range languageOptions.Presets[config.Provider] {
-			if preset.ID == config.Model {
-				return preset.Name
-			}
-		}
-		return config.Model
 	}
+	for _, preset := range languageOptions.Presets[config.Provider] {
+		if preset.ID == config.Model {
+			return preset.Name
+		}
+	}
+	return config.Model
 }
 
 // Short device-generated states follow the same language as model replies.

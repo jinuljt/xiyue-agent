@@ -39,6 +39,12 @@ func TestDialogueLanguagesFollowTheSelectedVoice(t *testing.T) {
 	if _, ok := selectSpeechLanguage(settings, voicePlan{Language: "ko"}); ok {
 		t.Fatal("unsupported override accepted")
 	}
+	cantonese := settings
+	cantonese.TTS = ServiceConfig{Provider: "deepseek", Model: "stella", KeyConfigured: true}
+	if !cantonese.supportsDialogue("yue") || !cantonese.supportsPractice("yue") || cantonese.supportsDialogue("ja") ||
+		settings.supportsDialogue("yue") {
+		t.Fatal("Cantonese should use the realtime ASR with a compatible TTS voice")
+	}
 	switchInput := settingsInput(settings)
 	switchInput.TTS = ServiceInput{Provider: "system", ClearKey: true}
 	if err := p.saveSettings(switchInput); err == nil {
