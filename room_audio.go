@@ -273,14 +273,18 @@ func (r *roomAudio) available() bool {
 	return r != nil && r.voice != nil && r.voice.playPCM != nil
 }
 
+func (r *roomAudio) runtimeSnapshot() roomAudioStatus {
+	if r == nil {
+		return roomAudioStatus{Stage: "stopped"}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.status
+}
+
 func (a *api) roomAudioRoutes(m *http.ServeMux) {
 	m.HandleFunc("GET /api/room-audio", func(w http.ResponseWriter, req *http.Request) {
-		status := roomAudioStatus{Stage: "stopped"}
-		if a.room != nil {
-			a.room.mu.Lock()
-			status = a.room.status
-			a.room.mu.Unlock()
-		}
+		status := a.room.runtimeSnapshot()
 		s := a.platform.snapshot()
 		writeJSON(w, 200, map[string]any{"available": a.room.available(), "config": a.platform.roomConfig(), "status": status,
 			"listening": s.RoomListening, "password_configured": s.Sealed[roomPasswordKey] != ""})

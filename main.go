@@ -66,6 +66,7 @@ func (a *api) routes() http.Handler {
 	a.adminRoutes(m)
 	a.externalTaskRoutes(m)
 	a.activityRoutes(m)
+	a.capabilityRoutes(m)
 	m.HandleFunc("GET /api/console", a.consoleSnapshot)
 	m.HandleFunc("GET /api/state", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, a.platform.publicState()) })
 	m.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
@@ -350,6 +351,10 @@ func (a *api) guard(next http.Handler) http.Handler {
 				return
 			}
 		}
+		if capabilityEndpoint(r.URL.Path) {
+			a.externalCapabilityRequest(w, r, next)
+			return
+		}
 		if r.Method != "GET" && r.Method != "HEAD" {
 			contentType := strings.TrimSpace(strings.SplitN(r.Header.Get("Content-Type"), ";", 2)[0])
 			if r.Header.Get("X-Xiyue-Request") != "console" ||
@@ -554,6 +559,8 @@ func main() {
 		log.Fatal("无法安装预置流程: ", err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	room := newRoomAudio(ctx, speaker)
+	p.room, p.deviceModel, p.deviceFirmware = room, *deviceModel, *deviceFirmware
 	defer stop()
 	defer func() { _ = p.activity.flush() }()
 	if *alarmButton != "" {
@@ -647,7 +654,6 @@ func main() {
 			go p.serveWakeDetector(ctx, *wakeDetector, *wakeKeywords, voice, capture, captureLED)
 		}
 	}
-	room := newRoomAudio(ctx, speaker)
 	if err := room.restore(p); err != nil {
 		log.Print("远程听音配置未能恢复，请在控制台检查")
 	}

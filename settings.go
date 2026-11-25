@@ -112,6 +112,7 @@ func (p *Platform) publicState() State {
 }
 
 func (s State) publicFields() State {
+	s.CapabilityGrants, s.CapabilityReceipts = nil, nil
 	s.Sealed = nil
 	s.Owner = nil
 	s.ExternalTasks = nil
@@ -375,6 +376,7 @@ func (p *Platform) chat(ctx context.Context, message string) (string, error) {
 type replyOptions struct {
 	markTextSetup        bool
 	dialogueProbe        bool
+	beforeRoom           *roomAudioStatus
 	transientKey         *string
 	draft                bool
 	history              []voiceMessage

@@ -127,11 +127,7 @@ func (a *api) clockRoutes(m *http.ServeMux) {
 			bad(w, errors.New("倒计时须为 1 至 86400 秒，名称过长时请缩短"))
 			return
 		}
-		text := "计时结束。"
-		if in.Name != "" {
-			text = in.Name + "，计时结束。"
-		}
-		clockResponse(w, a.platform.scheduleVoiceTask(quickTimer.ID, text, time.Duration(in.Seconds)*time.Second, time.Now().UTC()))
+		clockResponse(w, a.platform.scheduleVoiceTask(quickTimer.ID, timerAnnouncement(in.Name), time.Duration(in.Seconds)*time.Second, time.Now().UTC()))
 	})
 	saveAlarm := func(w http.ResponseWriter, r *http.Request) {
 		var in struct {

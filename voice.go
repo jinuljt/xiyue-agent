@@ -448,6 +448,7 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 	}
 	result.Voice = voiceDisplayName(s.Settings.TTS)
 	result.Stage = "configuration"
+	roomBefore := p.room.runtimeSnapshot()
 	if err := v.yieldRoom(ctx); err != nil {
 		return result, err
 	}
@@ -523,7 +524,7 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 			previous = dialogue.history
 		}
 		var plan voicePlan
-		reply, err = p.voiceReply(ctx, s, text, replyOptions{history: previous, voicePlan: &plan, question: question, practice: practice != "", dialogueInstructions: dialoguePrompt(s.Settings, practice)})
+		reply, err = p.voiceReply(ctx, s, text, replyOptions{history: previous, voicePlan: &plan, beforeRoom: &roomBefore, question: question, practice: practice != "", dialogueInstructions: dialoguePrompt(s.Settings, practice)})
 		result.ModelMS = time.Since(start).Milliseconds()
 		if err != nil {
 			return result, err

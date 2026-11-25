@@ -78,36 +78,40 @@ type Schedule struct {
 	Failure   string            `json:"failure,omitempty"`
 }
 type State struct {
-	Search        searchSettings    `json:"search,omitempty"`
-	HomeAssistant string            `json:"home_assistant,omitempty"`
-	HTTPTools     []networkTool     `json:"http_tools,omitempty"`
-	HTTPExample   bool              `json:"http_example_installed,omitempty"`
-	RuleExamples  bool              `json:"rule_examples_installed,omitempty"`
-	Features      map[string]bool   `json:"features,omitempty"`
-	FlowMigration bool              `json:"flow_migration,omitempty"`
-	LegacyFlows   []string          `json:"legacy_flows,omitempty"`
-	Rules         []automationRule  `json:"rules,omitempty"`
-	RoomListening bool              `json:"room_listening,omitempty"`
-	RoomAudio     *roomAudioConfig  `json:"room_audio,omitempty"`
-	ExternalTasks []externalTaskRef `json:"external_tasks,omitempty"`
-	queueSpeech   bool
-	Owner         *ownerState        `json:"owner,omitempty"`
-	Version       int                `json:"version"`
-	Abilities     map[string]Ability `json:"abilities"`
-	Tasks         []Task             `json:"tasks"`
-	Schedules     []Schedule         `json:"schedules"`
-	Events        []Event            `json:"events"`
-	Settings      SystemConfig       `json:"settings"`
-	Sealed        map[string]string  `json:"sealed,omitempty"`
-	Usage         []UsageRecord      `json:"usage"`
+	CapabilityGrants   []capabilityGrant   `json:"capability_grants,omitempty"`
+	CapabilityReceipts []capabilityReceipt `json:"capability_receipts,omitempty"`
+	Search             searchSettings      `json:"search,omitempty"`
+	HomeAssistant      string              `json:"home_assistant,omitempty"`
+	HTTPTools          []networkTool       `json:"http_tools,omitempty"`
+	HTTPExample        bool                `json:"http_example_installed,omitempty"`
+	RuleExamples       bool                `json:"rule_examples_installed,omitempty"`
+	Features           map[string]bool     `json:"features,omitempty"`
+	FlowMigration      bool                `json:"flow_migration,omitempty"`
+	LegacyFlows        []string            `json:"legacy_flows,omitempty"`
+	Rules              []automationRule    `json:"rules,omitempty"`
+	RoomListening      bool                `json:"room_listening,omitempty"`
+	RoomAudio          *roomAudioConfig    `json:"room_audio,omitempty"`
+	ExternalTasks      []externalTaskRef   `json:"external_tasks,omitempty"`
+	queueSpeech        bool
+	Owner              *ownerState        `json:"owner,omitempty"`
+	Version            int                `json:"version"`
+	Abilities          map[string]Ability `json:"abilities"`
+	Tasks              []Task             `json:"tasks"`
+	Schedules          []Schedule         `json:"schedules"`
+	Events             []Event            `json:"events"`
+	Settings           SystemConfig       `json:"settings"`
+	Sealed             map[string]string  `json:"sealed,omitempty"`
+	Usage              []UsageRecord      `json:"usage"`
 }
 type Platform struct {
-	mu          sync.Mutex
-	path        string
-	state       State
-	queueSpeech bool
-	wakeWords   map[string]bool
-	activity    *activityStore
+	room                        *roomAudio
+	deviceModel, deviceFirmware string
+	mu                          sync.Mutex
+	path                        string
+	state                       State
+	queueSpeech                 bool
+	wakeWords                   map[string]bool
+	activity                    *activityStore
 	// Owned by the automation worker. Running workflows are interrupted on restart.
 	automationValues map[string]map[string]json.RawMessage
 }

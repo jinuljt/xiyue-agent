@@ -570,74 +570,79 @@ func (p *Platform) startAutomation(now time.Time, room *roomAudio, id, source st
 func (p *Platform) startAutomationObserved(now time.Time, id, source string, observations map[string]automationObservation, trigger *automationStateBaseline) error {
 	run := automationRun{ID: newID(), At: now, Source: source, Status: "running", Step: 1}
 	err := p.change(func(s *State) error {
-		for i := range s.Rules {
-			rule := &s.Rules[i]
-			if rule.ID != id {
-				continue
-			}
-			if len(rule.Runs) > 0 && rule.Runs[0].Status == "running" {
-				if source != "manual" {
-					return errNoVoiceChange
-				}
-				return errors.New("流程正在运行")
-			}
-			if source == "manual" && !rule.Schedule.Enabled && !isScheduledAutomation(*rule) {
-				return errors.New("请先启用此流程")
-			}
-			sources := automationStateSources(s, nil)
-			if trigger != nil {
-				spec, ok := sources[rule.StateSource]
-				if rule.Trigger != "state" || !rule.Schedule.Enabled || !ok ||
-					trigger.source != rule.StateSource || trigger.target != rule.ToState || trigger.identity != spec.identity {
-					return errNoVoiceChange
-				}
-			}
-			if source == "scheduled" {
-				if !isScheduledAutomation(*rule) || !scheduleDue(rule.Schedule, now) {
-					return errNoVoiceChange
-				}
-				if now.Sub(rule.Schedule.NextAt) > deliveryMaxAge {
-					run.Status, run.Error = "skipped", "已错过计划时间"
-				}
-				if rule.Schedule.Repeat == "once" {
-					rule.Schedule.Enabled = false
-				} else {
-					next, err := nextCalendarRun(rule.Schedule, now)
-					if err != nil {
-						return err
-					}
-					rule.Schedule.NextAt = next
-				}
-			}
-			if run.Status == "running" && !automationConditions(*rule, s.Settings.Timezone, now, sources, observations) {
-				run.Status, run.Error = "skipped", "当前不满足执行条件"
-			}
-			if run.Status == "skipped" {
-				run.Step = 0
-			}
-			for _, step := range rule.Actions {
-				label := step.Action
-				if step.Action == "tool" {
-					if local, ok := lookupLocalAutomationTool(step.Value, nil); ok {
-						label = local.Name
-					} else if tool, ok := findNetworkTool(s, step.Value); ok {
-						label = tool.Name
-					}
-				}
-				run.Actions = append(run.Actions, label)
-			}
-			rule.Runs = append([]automationRun{run}, rule.Runs[:min(12, len(rule.Runs))]...)
-			return nil
-		}
-		if source != "manual" {
-			return errNoVoiceChange
-		}
-		return errors.New("流程不存在")
+		return appendAutomationRun(s, id, &run, observations, trigger)
 	})
 	if errors.Is(err, errNoVoiceChange) {
 		return nil
 	}
 	return err
+}
+
+func appendAutomationRun(s *State, id string, run *automationRun, observations map[string]automationObservation, trigger *automationStateBaseline) error {
+	now, source := run.At, run.Source
+	for i := range s.Rules {
+		rule := &s.Rules[i]
+		if rule.ID != id {
+			continue
+		}
+		if len(rule.Runs) > 0 && rule.Runs[0].Status == "running" {
+			if source != "manual" {
+				return errNoVoiceChange
+			}
+			return errors.New("流程正在运行")
+		}
+		if source == "manual" && !rule.Schedule.Enabled && !isScheduledAutomation(*rule) {
+			return errors.New("请先启用此流程")
+		}
+		sources := automationStateSources(s, nil)
+		if trigger != nil {
+			spec, ok := sources[rule.StateSource]
+			if rule.Trigger != "state" || !rule.Schedule.Enabled || !ok ||
+				trigger.source != rule.StateSource || trigger.target != rule.ToState || trigger.identity != spec.identity {
+				return errNoVoiceChange
+			}
+		}
+		if source == "scheduled" {
+			if !isScheduledAutomation(*rule) || !scheduleDue(rule.Schedule, now) {
+				return errNoVoiceChange
+			}
+			if now.Sub(rule.Schedule.NextAt) > deliveryMaxAge {
+				run.Status, run.Error = "skipped", "已错过计划时间"
+			}
+			if rule.Schedule.Repeat == "once" {
+				rule.Schedule.Enabled = false
+			} else {
+				next, err := nextCalendarRun(rule.Schedule, now)
+				if err != nil {
+					return err
+				}
+				rule.Schedule.NextAt = next
+			}
+		}
+		if run.Status == "running" && !automationConditions(*rule, s.Settings.Timezone, now, sources, observations) {
+			run.Status, run.Error = "skipped", "当前不满足执行条件"
+		}
+		if run.Status == "skipped" {
+			run.Step = 0
+		}
+		for _, step := range rule.Actions {
+			label := step.Action
+			if step.Action == "tool" {
+				if local, ok := lookupLocalAutomationTool(step.Value, nil); ok {
+					label = local.Name
+				} else if tool, ok := findNetworkTool(s, step.Value); ok {
+					label = tool.Name
+				}
+			}
+			run.Actions = append(run.Actions, label)
+		}
+		rule.Runs = append([]automationRun{*run}, rule.Runs[:min(12, len(rule.Runs))]...)
+		return nil
+	}
+	if source != "manual" {
+		return errNoVoiceChange
+	}
+	return errors.New("流程不存在")
 }
 
 func automationConditions(rule automationRule, tz string, now time.Time, sources map[string]automationStateSpec, observations map[string]automationObservation) bool {

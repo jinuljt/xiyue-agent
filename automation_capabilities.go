@@ -40,11 +40,7 @@ func timerAutomationTool() automationToolSpec {
 		},
 		run: func(p *Platform, args map[string]string, now time.Time) error {
 			seconds, _ := strconv.Atoi(args["seconds"])
-			name := "计时结束。"
-			if args["name"] != "" {
-				name = args["name"] + "，计时结束。"
-			}
-			return p.scheduleVoiceTask(quickTimer.ID, name, time.Duration(seconds)*time.Second, now)
+			return p.scheduleVoiceTask(quickTimer.ID, timerAnnouncement(args["name"]), time.Duration(seconds)*time.Second, now)
 		},
 	}
 }

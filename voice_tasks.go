@@ -159,36 +159,47 @@ func (p *Platform) voiceTask(text string, now time.Time) (voiceTaskReply, error)
 
 func (p *Platform) scheduleVoiceTask(ability, content string, duration time.Duration, now time.Time) error {
 	return p.change(func(s *State) error {
-		if ability == quickTimer.ID {
-			if !featureEnabled(s, "timers") {
-				return errors.New("倒计时未启用")
-			}
-			kept := s.Schedules[:0]
-			for _, schedule := range s.Schedules {
-				recent := now.Sub(schedule.NextAt) <= deliveryMaxAge
-				if schedule.AbilityID != quickTimer.ID || schedule.Enabled || recent {
-					kept = append(kept, schedule)
-				}
-			}
-			s.Schedules = kept
-		}
-		if len(s.Schedules) >= 100 {
-			return errors.New("定时计划已满")
-		}
-		sc := Schedule{ID: newID(), AbilityID: ability, Inputs: map[string]string{"content": content},
-			NextAt: now.Add(duration), Repeat: "once", Timezone: s.Settings.Timezone, Enabled: true}
-		if _, ok := s.Abilities[ability]; !ok && ability == quickTimer.ID {
-			if len(s.Abilities) >= 32 {
-				return errors.New("能力列表已满")
-			}
-			s.Abilities[ability] = Ability{Manifest: quickTimer, Enabled: true, Config: map[string]string{}}
-		}
-		if err := validateSchedule(s, sc, now); err != nil {
-			return err
-		}
-		s.Schedules = append(s.Schedules, sc)
-		return nil
+		return addVoiceSchedule(s, ability, content, duration, now, newID())
 	})
+}
+
+func timerAnnouncement(name string) string {
+	if name == "" {
+		return "计时结束。"
+	}
+	return name + "，计时结束。"
+}
+
+func addVoiceSchedule(s *State, ability, content string, duration time.Duration, now time.Time, id string) error {
+	if ability == quickTimer.ID {
+		if !featureEnabled(s, "timers") {
+			return errors.New("倒计时未启用")
+		}
+		kept := s.Schedules[:0]
+		for _, schedule := range s.Schedules {
+			recent := now.Sub(schedule.NextAt) <= deliveryMaxAge
+			if schedule.AbilityID != quickTimer.ID || schedule.Enabled || recent {
+				kept = append(kept, schedule)
+			}
+		}
+		s.Schedules = kept
+	}
+	if len(s.Schedules) >= 100 {
+		return errors.New("定时计划已满")
+	}
+	sc := Schedule{ID: id, AbilityID: ability, Inputs: map[string]string{"content": content},
+		NextAt: now.Add(duration), Repeat: "once", Timezone: s.Settings.Timezone, Enabled: true}
+	if _, ok := s.Abilities[ability]; !ok && ability == quickTimer.ID {
+		if len(s.Abilities) >= 32 {
+			return errors.New("能力列表已满")
+		}
+		s.Abilities[ability] = Ability{Manifest: quickTimer, Enabled: true, Config: map[string]string{}}
+	}
+	if err := validateSchedule(s, sc, now); err != nil {
+		return err
+	}
+	s.Schedules = append(s.Schedules, sc)
+	return nil
 }
 
 var errNoVoiceChange = errors.New("没有要保存的语音任务变更")
