@@ -83,6 +83,9 @@ func (wav roomWAV) stream(ctx context.Context, c roomAudioConfig, frames chan ro
 	input := make([]byte, ((wav.rate+49)/50)*block)
 	remainder := 0
 	gain, levelPower := 1.0, 0.0
+	enhanceVoice := c.enhancesVoice()
+	autoGain := c.AutoGain || enhanceVoice
+	var noise roomNoiseReducer
 	for ctx.Err() == nil {
 		expected := (wav.rate + remainder) / 50
 		remainder = (wav.rate + remainder) % 50
@@ -108,12 +111,16 @@ func (wav roomWAV) stream(ctx context.Context, c roomAudioConfig, frames chan ro
 			}
 			levelPower += 0.08 * (power - levelPower)
 			level := int(math.Round(10 * math.Log10(max(1.0, levelPower)/(32768.0*32768.0))))
+			signal := true
+			if enhanceVoice {
+				power, peak, signal = noise.reduce(frame.data[:frame.size])
+			}
 			volume := float64(c.Volume) / 100
-			if c.AutoGain {
+			if autoGain {
 				// Aim for -18 dBFS RMS, cap boost at +24 dB and ceiling at -6 dBFS.
 				// Near-silence relaxes gain instead of pulling the noise floor up.
 				target := 1.0
-				if power >= 26*26 {
+				if signal && power >= 26*26 {
 					target = min(16, 4125/math.Sqrt(power))
 				}
 				rate := 0.04
@@ -126,7 +133,7 @@ func (wav roomWAV) stream(ctx context.Context, c roomAudioConfig, frames chan ro
 			for i := range output {
 				sample := int16(binary.LittleEndian.Uint16(frame.data[i*2:]))
 				adjusted := int(float64(sample) * volume)
-				if !c.AutoGain {
+				if !autoGain {
 					adjusted = int(sample) * c.Volume / 100
 				}
 				binary.LittleEndian.PutUint16(frame.data[i*2:], uint16(int16(adjusted)))

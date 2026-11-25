@@ -15,11 +15,16 @@ import (
 )
 
 type roomAudioConfig struct {
-	Name     string `json:"name"`
-	Source   string `json:"source"`
-	Volume   int    `json:"volume"`
-	AutoGain bool   `json:"auto_gain"`
-	Username string `json:"username,omitempty"`
+	Name             string `json:"name"`
+	Source           string `json:"source"`
+	Volume           int    `json:"volume"`
+	AutoGain         bool   `json:"auto_gain"`
+	VoiceEnhancement *bool  `json:"voice_enhancement,omitempty"`
+	Username         string `json:"username,omitempty"`
+}
+
+func (c roomAudioConfig) enhancesVoice() bool {
+	return c.VoiceEnhancement == nil || *c.VoiceEnhancement
 }
 
 const roomPasswordKey = "room-audio:password"

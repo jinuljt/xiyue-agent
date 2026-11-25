@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -117,7 +118,7 @@ func TestRoomAudioLifecycleAndPriority(t *testing.T) {
 		}
 	}
 	fixtureAddress := "http://" + netip.AddrFrom4([4]byte{10, 0, 0, 1}).String() + "/audio.wav"
-	source := `{"source":"` + fixtureAddress + `","volume":70}`
+	source := `{"source":"` + fixtureAddress + `","volume":70,"voice_enhancement":false}`
 	credentials := source[:len(source)-1] + `,"username":"` + username + `","password":"` + password + `"}`
 	keepPassword := source[:len(source)-1] + `,"username":"` + username + `"}`
 	request("PUT", "", `{"source":"http://127.0.0.1/audio.wav","volume":70}`, 400)
@@ -188,7 +189,7 @@ func TestRoomAudioLifecycleAndPriority(t *testing.T) {
 	if reopened.snapshot().RoomListening {
 		t.Fatal("manual stop should survive restart")
 	}
-	if config := reopened.roomConfig(); config.Source != fixtureAddress || config.Volume != 70 {
+	if config := reopened.roomConfig(); config.Source != fixtureAddress || config.Volume != 70 || config.enhancesVoice() {
 		t.Fatalf("config was not restored: %+v", config)
 	}
 	draft := strings.Replace(keepPassword, `"volume":70`, `"volume":35,"name":"temporary"`, 1)
@@ -256,7 +257,8 @@ func TestRoomAutoGainLiftsQuietAudioAndLimitsPeaks(t *testing.T) {
 	frames := make(chan roomFrame, frameCount+2)
 	var levels []int
 	wav := roomWAV{pcm: &pcm, rate: 24000, channels: 1}
-	err := wav.stream(context.Background(), roomAudioConfig{Volume: 100, AutoGain: true}, frames, func(level int) {
+	enhancement := false
+	err := wav.stream(context.Background(), roomAudioConfig{Volume: 100, AutoGain: true, VoiceEnhancement: &enhancement}, frames, func(level int) {
 		levels = append(levels, level)
 	})
 	if err != io.EOF || len(levels) != frameCount+2 {
@@ -274,5 +276,54 @@ func TestRoomAutoGainLiftsQuietAudioAndLimitsPeaks(t *testing.T) {
 	}
 	if got := sample(<-frames); got != 0 {
 		t.Fatalf("silence produced nonzero output: %d", got)
+	}
+}
+
+func TestRoomVoiceEnhancementSeparatesWeakSignalFromSustainedNoise(t *testing.T) {
+	const quietFrames, voiceFrames = 80, 60
+	enhancementOff := false
+	run := func(config roomAudioConfig) (float64, float64) {
+		var pcm bytes.Buffer
+		for i := range (quietFrames + voiceFrames) * roomSamplesPerFrame {
+			tm := float64(i) / 24000
+			sample := 130 * math.Sin(2*math.Pi*60*tm)
+			if i >= quietFrames*roomSamplesPerFrame {
+				sample += 325 * math.Sin(2*math.Pi*450*tm)
+			}
+			_ = binary.Write(&pcm, binary.LittleEndian, int16(sample))
+		}
+		frames := make(chan roomFrame, quietFrames+voiceFrames)
+		wav := roomWAV{pcm: &pcm, rate: 24000, channels: 1}
+		if err := wav.stream(context.Background(), config, frames, func(int) {}); err != io.EOF {
+			t.Fatal(err)
+		}
+		rms := func(f roomFrame) float64 {
+			var energy float64
+			for i := 0; i < f.size; i += 2 {
+				x := float64(int16(binary.LittleEndian.Uint16(f.data[i:])))
+				energy += x * x
+			}
+			return math.Sqrt(energy / float64(f.size/2))
+		}
+		var quiet, signal float64
+		for i := range quietFrames + voiceFrames {
+			f := <-frames
+			if i == quietFrames-1 {
+				quiet = rms(f)
+			}
+			if i == quietFrames+voiceFrames-1 {
+				signal = rms(f)
+			}
+		}
+		return quiet, signal
+	}
+	rawNoise, rawSignal := run(roomAudioConfig{Volume: 100, VoiceEnhancement: &enhancementOff})
+	noise, signal := run(roomAudioConfig{Volume: 100})
+	if noise <= 0 || noise > rawNoise*0.65 || signal < rawSignal*2 {
+		t.Fatalf("raw noise/voice %.1f/%.1f, enhanced %.1f/%.1f", rawNoise, rawSignal, noise, signal)
+	}
+	silentNoise, silentSignal := run(roomAudioConfig{Volume: 0})
+	if silentNoise != 0 || silentSignal != 0 {
+		t.Fatalf("zero listening volume produced %.1f/%.1f", silentNoise, silentSignal)
 	}
 }
