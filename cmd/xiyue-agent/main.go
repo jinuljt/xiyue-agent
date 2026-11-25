@@ -411,7 +411,7 @@ func (a *api) consoleSnapshot(w http.ResponseWriter, r *http.Request) {
 func main() {
 	listen := flag.String("listen", "127.0.0.1:8765", "本地开发监听地址")
 	statePath := flag.String("state", "data/state.json", "持久化状态文件")
-	consoleDir := flag.String("console", "../xiyue-console", "控制台静态文件目录")
+	consoleDir := flag.String("console", "../xiyue-console/web", "控制台静态文件目录")
 	abilityDir := flag.String("abilities", "", "可选的声明式能力目录")
 	systemVoice := flag.Bool("system-voice", false, "启用本机原生播报和 WAV 语音入口")
 	wakeSocket := flag.String("oh2p-wake-socket", "", "OH2P 本地唤醒事件套接字")
