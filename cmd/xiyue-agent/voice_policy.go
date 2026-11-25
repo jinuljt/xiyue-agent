@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -19,7 +20,6 @@ const speakerInstructions = `你是喜悦 Voice 音箱的语音助手。根据�
 只返回一种动作。询问、假设、多项指令或指令含糊时不要发起设备动作。请勿承诺尚未执行的操作。缺少实时信息时如实说明。`
 
 var endDialogue = regexp.MustCompile(`^(?:(?:谢谢|好了|好|行)[，,\s]*)?(?:请|那就|我们)?(?:先)?(?:结束(?:对话|聊天)|退出(?:对话|聊天)?|不聊|不用(?:再|继续)聊|(?:今天|这次)?(?:就这样|到这(?:里|儿))|下次再聊|再见|拜拜)(?:了|吧|啦)?$`)
-var detailedSpeech = regexp.MustCompile(`详细|展开|细说|一步步|多说点|再多讲`)
 var hypotheticalTask = regexp.MustCompile(`^(?:请|你能)?(?:说说|解释|举例|如何|怎么|怎样|如果|假如|不要|不用)`)
 
 type voicePlan struct {
@@ -86,57 +86,36 @@ func (p *Platform) applyVoicePlan(plan voicePlan, request, language string, now 
 	}
 }
 
-func speechForSpeaker(text, request string) string {
-	return speechForLanguage(text, request, "zh")
-}
-
-func speechForLanguage(text, request, language string) string {
+func speechForLanguage(text, language string) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return localizedVoiceText(language, "repeat")
 	}
-	maxSentences, maxRunes := 2, 56
-	if language != "zh" {
-		maxSentences, maxRunes = 3, 240
-	}
-	if detailedSpeech.MatchString(request) {
-		maxSentences, maxRunes = 6, 320
-	}
-	sentences, runes, lastEnd := 0, 0, 0
+	return text
+}
+
+func nextSpeechPart(text string) (part, rest string) {
+	const targetRunes = 120
+	runes, sentence, clause := 0, 0, 0
 	for index, char := range text {
+		if runes == targetRunes {
+			end := index
+			if sentence > 0 {
+				end = sentence
+			} else if clause > 0 {
+				end = clause
+			}
+			return strings.TrimSpace(text[:end]), strings.TrimSpace(text[end:])
+		}
 		runes++
-		if runes > maxRunes {
-			break
-		}
-		// Full stops adjacent to ASCII digits or letters can be decimals and abbreviations.
-		punctuation := strings.ContainsRune("。！？!?", char)
-		if char == '.' && (index+1 == len(text) || text[index+1] == ' ' || text[index+1] == '\n') {
-			punctuation = true
-		}
-		if punctuation {
-			if lastEnd == index {
-				lastEnd = index + utf8.RuneLen(char)
-				continue
-			}
-			sentences++
-			lastEnd = index + utf8.RuneLen(char)
-			if sentences >= maxSentences {
-				return strings.TrimSpace(text[:lastEnd])
-			}
+		end := index + utf8.RuneLen(char)
+		switch {
+		case strings.ContainsRune("。！？!?…\n", char),
+			char == '.' && (end == len(text) || text[end] == ' ' || text[end] == '\n'):
+			sentence = end
+		case strings.ContainsRune("，、；：", char), unicode.IsSpace(char):
+			clause = end
 		}
 	}
-	if runes <= maxRunes {
-		return text
-	}
-	if lastEnd > 0 {
-		return strings.TrimSpace(text[:lastEnd])
-	}
-	if language != "zh" {
-		part := string([]rune(text)[:maxRunes])
-		if n := strings.LastIndex(part, " "); n > len(part)/2 {
-			part = part[:n]
-		}
-		return part
-	}
-	return "这段内容比较长，你想先听哪一部分？"
+	return text, ""
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -87,8 +88,8 @@ func TestSpeakerDialoguePolicyExecutesAndEnds(t *testing.T) {
 	}
 	utterance = "先不用开灯，明早下雨吗"
 	modelReply = `{"action":"speak","speech":"预计有雨。早上出门带伞。可以多关注一下。"}`
-	if got := run(); got.Stage != "completed" || spoken[len(spoken)-1] != "预计有雨。早上出门带伞。" {
-		t.Fatal("mixed request must continue and stay concise", spoken)
+	if got := run(); got.Stage != "completed" || spoken[len(spoken)-1] != "预计有雨。早上出门带伞。可以多关注一下。" {
+		t.Fatal("mixed request must preserve the spoken answer", spoken)
 	}
 	modelOffline = true
 	result, err := p.runVoiceTurn(context.Background(), v, capture, led.Store)
@@ -97,7 +98,7 @@ func TestSpeakerDialoguePolicyExecutesAndEnds(t *testing.T) {
 	}
 }
 
-func TestSpeakerReplyRejectsMalformedActionsAndPreservesUnits(t *testing.T) {
+func TestSpeakerReplyRejectsMalformedActions(t *testing.T) {
 	for _, input := range []string{
 		`{"action":"anything"}`, `{"action":"countdown","seconds":1.5}`,
 		`{"action":"end","unexpected":true}`, `{"action":"end"} {"action":"speak"}`,
@@ -106,11 +107,41 @@ func TestSpeakerReplyRejectsMalformedActionsAndPreservesUnits(t *testing.T) {
 			t.Fatalf("accepted %q", input)
 		}
 	}
-	const reply = "室温是 23.5 度。湿度是 51.2%。建议保持通风。"
-	if got := speechForSpeaker(reply, "现在室内环境如何"); got != "室温是 23.5 度。湿度是 51.2%。" {
-		t.Fatal(got)
+}
+
+func TestLongSpeechKeepsCompleteAnswerAndCanBeInterrupted(t *testing.T) {
+	const first = "室温是 23.5 度。湿度是 51.2%。"
+	tail := strings.Repeat("这一段没有句号但仍然要播报", 20)
+	reply := first + tail
+	if got := speechForLanguage(reply, "zh"); got != reply {
+		t.Fatalf("speech changed: %q", got)
 	}
-	if got := speechForSpeaker(reply, "详细说说"); got != reply {
-		t.Fatal(got)
+	p, err := openPlatform(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := p.snapshot()
+	s.Settings.TTS.Provider = "system"
+	var parts []string
+	v := &voiceRuntime{speak: func(_ context.Context, part string) error {
+		parts = append(parts, part)
+		return nil
+	}}
+	if err := p.playSpeechWithKey(context.Background(), v, s, reply, "zh", nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) < 3 || parts[0] != first || strings.Join(parts, "") != reply {
+		t.Fatalf("unexpected parts: %q", parts)
+	}
+	parts = nil
+	v.speak = func(_ context.Context, part string) error {
+		parts = append(parts, part)
+		if !v.stopPlayback() {
+			t.Fatal("playback could not be interrupted")
+		}
+		return nil
+	}
+	if err := p.playSpeechWithKey(context.Background(), v, s, reply, "zh", nil, true); err != context.Canceled || len(parts) != 1 {
+		t.Fatalf("interrupt: parts=%q err=%v", parts, err)
 	}
 }

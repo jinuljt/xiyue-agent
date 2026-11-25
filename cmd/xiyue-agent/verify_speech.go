@@ -208,7 +208,7 @@ func (a *api) runDialogueProbe(ctx context.Context, s State, result dialogueProb
 		return
 	}
 	out.Stage = "playback"
-	out.Reply = speechForLanguage(out.Reply, out.Transcript, out.Language)
+	out.Reply = speechForLanguage(out.Reply, out.Language)
 	err = a.platform.playSpeechWithKey(ctx, a.speechProbe, s, out.Reply, out.Language, ttsKey, true)
 	if err == nil {
 		out.Stage = "completed"

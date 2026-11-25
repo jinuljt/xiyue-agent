@@ -50,8 +50,28 @@ func (p *Platform) playSpeechWithKey(ctx context.Context, v *voiceRuntime, s Sta
 		return err
 	}
 	defer finish()
+
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return errors.New("播报内容为空")
+	}
+	for text != "" {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		part, rest := nextSpeechPart(text)
+		if err := p.playSpeechPart(ctx, v, s, part, language, temporary, test); err != nil {
+			return err
+		}
+		text = rest
+	}
+	return ctx.Err()
+}
+
+func (p *Platform) playSpeechPart(ctx context.Context, v *voiceRuntime, s State, text, language string, temporary *string, test bool) error {
 	if s.Settings.TTS.Provider == "system" {
-		if err = v.speak(ctx, text); ctx.Err() != nil {
+		err := v.speak(ctx, text)
+		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if !test {

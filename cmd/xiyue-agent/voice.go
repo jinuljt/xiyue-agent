@@ -575,7 +575,7 @@ func (p *Platform) runSpeechTurn(parent context.Context, v *voiceRuntime, captur
 			}
 			reply = taskReply.text
 		}
-		reply = speechForLanguage(reply, command, language)
+		reply = speechForLanguage(reply, language)
 	}
 	result.taskID = taskReply.taskID
 	result.Stage = "playback"
