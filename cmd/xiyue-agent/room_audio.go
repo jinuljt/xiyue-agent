@@ -18,6 +18,7 @@ type roomAudioConfig struct {
 	Name     string `json:"name"`
 	Source   string `json:"source"`
 	Volume   int    `json:"volume"`
+	AutoGain bool   `json:"auto_gain"`
 	Username string `json:"username,omitempty"`
 }
 
@@ -88,6 +89,7 @@ type roomAudioStatus struct {
 	Running   bool       `json:"running"`
 	Stage     string     `json:"stage"`
 	LastAudio *time.Time `json:"last_audio_at,omitempty"`
+	InputDBFS *int       `json:"input_dbfs,omitempty"`
 	Problem   string     `json:"problem,omitempty"`
 }
 
@@ -163,6 +165,9 @@ func (r *roomAudio) stage(stage string) {
 	defer r.mu.Unlock()
 	if r.status.Stage != "stopping" {
 		r.status.Stage = stage
+		if stage != "playing" {
+			r.status.InputDBFS = nil
+		}
 		if stage == "connected" {
 			r.status.Problem = ""
 		}
@@ -180,10 +185,11 @@ func (r *roomAudio) relay(ctx context.Context, c roomAudioConfig, password strin
 	frames := make(chan roomFrame, 12)
 	finished := make(chan error, 1)
 	go func() {
-		finished <- wav.stream(ctx, c.Volume, frames, func() {
+		finished <- wav.stream(ctx, c, frames, func(level int) {
 			now := time.Now().UTC()
 			r.mu.Lock()
 			r.status.LastAudio = &now
+			r.status.InputDBFS = &level
 			r.mu.Unlock()
 		})
 	}()
@@ -279,7 +285,11 @@ func (r *roomAudio) runtimeSnapshot() roomAudioStatus {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.status
+	status := r.status
+	if status.Stage != "playing" || status.LastAudio == nil || time.Since(*status.LastAudio) > 3*time.Second {
+		status.InputDBFS = nil
+	}
+	return status
 }
 
 func (a *api) roomAudioRoutes(m *http.ServeMux) {

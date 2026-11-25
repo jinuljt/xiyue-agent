@@ -145,6 +145,7 @@ func TestRoomAudioLifecycleAndPriority(t *testing.T) {
 	awaitPlayback()
 	current := request("GET", "", "", 200)
 	if !strings.Contains(current.Body.String(), `"stage":"playing"`) || !strings.Contains(current.Body.String(), `"last_audio_at"`) ||
+		!strings.Contains(current.Body.String(), `"input_dbfs"`) ||
 		!strings.Contains(current.Body.String(), `"password_configured":true`) || strings.Contains(current.Body.String(), password) {
 		t.Fatal(current.Body.String())
 	}
@@ -232,5 +233,46 @@ func TestRoomAudioLifecycleAndPriority(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("listening did not resume from saved configuration")
+	}
+}
+
+func TestRoomAutoGainLiftsQuietAudioAndLimitsPeaks(t *testing.T) {
+	const frameCount = 100
+	var pcm bytes.Buffer
+	addFrame := func(amplitude int16) {
+		for i := range roomSamplesPerFrame {
+			value := amplitude
+			if i%2 != 0 {
+				value = -value
+			}
+			_ = binary.Write(&pcm, binary.LittleEndian, value)
+		}
+	}
+	for range frameCount {
+		addFrame(200)
+	}
+	addFrame(32767)
+	addFrame(0)
+	frames := make(chan roomFrame, frameCount+2)
+	var levels []int
+	wav := roomWAV{pcm: &pcm, rate: 24000, channels: 1}
+	err := wav.stream(context.Background(), roomAudioConfig{Volume: 100, AutoGain: true}, frames, func(level int) {
+		levels = append(levels, level)
+	})
+	if err != io.EOF || len(levels) != frameCount+2 {
+		t.Fatalf("rendered %d frames: %v", len(levels), err)
+	}
+	for range frameCount - 1 {
+		<-frames
+	}
+	sample := func(frame roomFrame) int16 { return int16(binary.LittleEndian.Uint16(frame.data[:])) }
+	if got := sample(<-frames); got < 2500 || got > 3200 || levels[frameCount-1] != -44 {
+		t.Fatalf("quiet output %d, input meter %d", got, levels[frameCount-1])
+	}
+	if got := sample(<-frames); got != 16384 {
+		t.Fatalf("unexpected peak: %d", got)
+	}
+	if got := sample(<-frames); got != 0 {
+		t.Fatalf("silence produced nonzero output: %d", got)
 	}
 }
